@@ -1,0 +1,18 @@
+{
+  "workspaces": [
+    {
+      "id": "terminal-agent",
+      "name": "Terminal Agent",
+      "path": "/Users/you/Documents/Code/terminal-agent",
+      "enabled": true
+    },
+    {
+      "id": "side-project",
+      "name": "Side Project",
+      "path": "/Users/you/Documents/Code/side-project",
+      "enabled": false,
+      "model": "claude-sonnet-5",
+      "permissionMode": "acceptEdits"
+    }
+  ]
+}

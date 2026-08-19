@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job for terminal-agent.
+
+  1. Edit every path below to match your machine.
+  2. cp deploy/com.terminal-agent.plist ~/Library/LaunchAgents/
+  3. launchctl load ~/Library/LaunchAgents/com.terminal-agent.plist
+
+  Runs as your user so the CLI finds its credentials and your repositories.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.terminal-agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/you/Documents/Code/terminal-agent/dist/server/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/you/Documents/Code/terminal-agent</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOST</key><string>127.0.0.1</string>
+    <key>PORT</key><string>4823</string>
+    <key>WORKSPACES_FILE</key><string>/Users/you/Documents/Code/terminal-agent/workspaces.json</string>
+    <key>STATE_DIR</key><string>/Users/you/Documents/Code/terminal-agent/.data</string>
+    <key>REQUIRE_TAILSCALE_IDENTITY</key><string>true</string>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/Users/you/.local/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/you/Library/Logs/terminal-agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/Library/Logs/terminal-agent.error.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

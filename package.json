@@ -15,6 +15,7 @@
     "start": "node dist/server/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json",
     "test": "npm run build >/dev/null && node --test tests/*.test.mjs",
+    "setup": "node scripts/setup.mjs",
     "serve:tailscale": "node scripts/tailscale-serve.mjs",
     "test:live": "node scripts/e2e-live.mjs"
   },

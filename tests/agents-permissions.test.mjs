@@ -14,35 +14,37 @@ test('both agents are offered, and a session runs on the one that was chosen', a
   const { agents, defaultAgent } = res.json();
 
   const ids = agents.map((a) => a.id);
-  assert.deepEqual(ids.sort(), ['claude-code', 'gemini-cli']);
+  assert.deepEqual(ids.sort(), ['antigravity-cli', 'claude-code']);
   assert.equal(defaultAgent, 'claude-code');
   assert.ok(agents.every((a) => a.available), 'both fake binaries resolve on PATH');
 
   const claude = agents.find((a) => a.id === 'claude-code');
-  const gemini = agents.find((a) => a.id === 'gemini-cli');
+  const agy = agents.find((a) => a.id === 'antigravity-cli');
   assert.equal(claude.supportsPermissionPrompts, true);
-  assert.equal(gemini.supportsPermissionPrompts, false);
   assert.equal(claude.persistentProcess, true);
-  assert.equal(gemini.persistentProcess, false);
+  assert.equal(agy.supportsPermissionPrompts, false);
+  assert.equal(agy.persistentProcess, true);
+  assert.equal(agy.displayName, 'Antigravity CLI');
   // The picker needs a path, but never a filesystem path.
   assert.ok(!JSON.stringify(agents).includes(h.repo));
 
-  const gem = await h.sessions.create({ workspaceId: 'repo', adapterId: 'gemini-cli', createdBy: null });
-  assert.equal(gem.summary().adapterId, 'gemini-cli');
-  assert.equal(gem.summary().adapterName, 'Gemini CLI');
+  const sessionAgy = await h.sessions.create({ workspaceId: 'repo', adapterId: 'antigravity-cli', createdBy: null });
+  assert.equal(sessionAgy.summary().adapterId, 'antigravity-cli');
+  assert.equal(sessionAgy.summary().adapterName, 'Antigravity CLI');
 
-  const cc = await h.sessions.create({ workspaceId: 'repo', adapterId: 'claude-code', createdBy: null });
-  assert.equal(cc.summary().adapterId, 'claude-code');
+  const sessionClaude = await h.sessions.create({ workspaceId: 'repo', adapterId: 'claude-code', createdBy: null });
+  assert.equal(sessionClaude.summary().adapterId, 'claude-code');
+  assert.equal(sessionClaude.summary().adapterName, 'Claude Code');
 
   // Sessions on different agents coexist.
   assert.equal(h.sessions.liveCount, 2);
 });
 
 test('unknown or uninstalled agents are refused', async (t) => {
-  const h = await buildHarness({ GEMINI_COMMAND: '/nonexistent/gemini-binary' });
+  const h = await buildHarness({ AGY_COMMAND: '/nonexistent/agy-binary' });
   t.after(() => h.close());
 
-  for (const bad of ['nope', '../claude-code', 42, {}]) {
+  for (const bad of ['nope', '../antigravity-cli', 42, {}]) {
     await assert.rejects(
       () => h.sessions.create({ workspaceId: 'repo', adapterId: bad, createdBy: null }),
       /Unknown agent/,
@@ -55,160 +57,20 @@ test('unknown or uninstalled agents are refused', async (t) => {
   assert.equal(defaulted.summary().adapterId, 'claude-code');
 
   await assert.rejects(
-    () => h.sessions.create({ workspaceId: 'repo', adapterId: 'gemini-cli', createdBy: null }),
+    () => h.sessions.create({ workspaceId: 'repo', adapterId: 'antigravity-cli', createdBy: null }),
     /not installed/,
   );
 
   const res = await h.app.inject({
     method: 'POST',
     url: '/api/sessions',
-    payload: { workspaceId: 'repo', adapterId: 'gemini-cli' },
+    payload: { workspaceId: 'repo', adapterId: 'antigravity-cli' },
   });
   assert.equal(res.statusCode, 409);
   assert.equal(res.json().error, 'adapter_unavailable');
 
   const listed = (await h.app.inject({ method: 'GET', url: '/api/agents' })).json();
-  assert.equal(listed.agents.find((a) => a.id === 'gemini-cli').available, false);
-});
-
-// ---------------------------------------------------------------- gemini
-
-test('gemini runs one process per instruction and keeps the conversation', async (t) => {
-  const h = await buildHarness();
-  t.after(() => h.close());
-
-  const session = await h.sessions.create({ workspaceId: 'repo', adapterId: 'gemini-cli', createdBy: null });
-  const sink = collectEvents(session);
-
-  // No process exists until there is something to do.
-  assert.equal(session.summary().state, 'idle');
-  assert.equal(session.summary().pid, null);
-  assert.equal(session.summary().live, true);
-
-  await session.instruct('TOOL SHELL DELTA hello', null);
-  await waitFor(() => session.summary().state === 'busy', { label: 'busy' });
-  assert.ok(session.summary().pid, 'a turn has a live process');
-
-  await waitFor(() => sink.types().includes('turn_finished'), { label: 'turn_finished' });
-
-  const types = sink.types();
-  for (const expected of [
-    'session_started',
-    'message_delta',
-    'message',
-    'tool_use',
-    'tool_result',
-    'command_started',
-    'command_finished',
-    'turn_finished',
-  ]) {
-    assert.ok(types.includes(expected), `expected ${expected}, got ${[...new Set(types)].join(', ')}`);
-  }
-
-  // The prompt echo the CLI emits as a user message must not be re-rendered.
-  assert.ok(
-    !sink.events.some((e) => e.type === 'message' && e.role === 'user'),
-    'the echoed user prompt is not forwarded as a message',
-  );
-
-  const cliSessionId = session.summary().cliSessionId;
-  assert.ok(cliSessionId, 'the conversation id is captured from init');
-
-  // Back to idle with no process, and the session is still alive.
-  await waitFor(() => session.summary().state === 'idle', { label: 'idle again' });
-  assert.equal(session.summary().pid, null);
-  assert.equal(session.summary().live, true, 'a finished turn does not end the session');
-
-  await session.instruct('second turn', null);
-  await waitFor(
-    () => sink.events.some((e) => e.type === 'message' && String(e.text).includes('second turn')),
-    { label: 'second turn reply' },
-  );
-  assert.equal(
-    session.summary().cliSessionId,
-    cliSessionId,
-    'the second process resumed the same conversation',
-  );
-});
-
-test('gemini surfaces a failing exit with its stderr', async (t) => {
-  const h = await buildHarness();
-  t.after(() => h.close());
-
-  const session = await h.sessions.create({ workspaceId: 'repo', adapterId: 'gemini-cli', createdBy: null });
-  const sink = collectEvents(session);
-
-  await session.instruct('FAIL now', null);
-  await waitFor(() => sink.events.some((e) => e.type === 'error'), { label: 'error event' });
-
-  const error = sink.events.find((e) => e.type === 'error');
-  assert.match(error.message, /exited with code 41/);
-  assert.match(error.detail, /GOOGLE_CLOUD_PROJECT/, 'the operator sees why it failed');
-
-  // A failed turn still closes out, and the session remains usable.
-  await waitFor(() => sink.types().includes('turn_finished'));
-  assert.equal(sink.events.find((e) => e.type === 'turn_finished').isError, true);
-  await waitFor(() => session.summary().state === 'idle');
-  assert.equal(session.summary().live, true);
-});
-
-test('gemini closes the turn even when the CLI emits no result event', async (t) => {
-  const h = await buildHarness();
-  t.after(() => h.close());
-
-  const session = await h.sessions.create({ workspaceId: 'repo', adapterId: 'gemini-cli', createdBy: null });
-  const sink = collectEvents(session);
-
-  await session.instruct('NORESULT please', null);
-  await waitFor(() => sink.types().includes('turn_finished'), { label: 'synthesised turn_finished' });
-  await waitFor(() => session.summary().pendingInstructions === 0, { label: 'turn accounted for' });
-});
-
-test('cancelling a gemini turn kills its process but keeps the session', async (t) => {
-  const h = await buildHarness();
-  t.after(() => h.close());
-
-  const session = await h.sessions.create({ workspaceId: 'repo', adapterId: 'gemini-cli', createdBy: null });
-  const sink = collectEvents(session);
-
-  await session.instruct('SLOW work', null);
-  await waitFor(() => session.summary().state === 'busy');
-  const pid = session.summary().pid;
-
-  await session.cancel('test cancel');
-  await waitFor(() => sink.types().includes('session_cancelled'), { label: 'session_cancelled' });
-  await waitFor(() => session.summary().state === 'idle', { label: 'idle after cancel' });
-  assert.equal(session.summary().live, true);
-
-  await waitFor(
-    () => {
-      try {
-        process.kill(pid, 0);
-        return false;
-      } catch (err) {
-        return err.code === 'ESRCH';
-      }
-    },
-    { label: 'gemini process reaped' },
-  );
-
-  await session.instruct('after cancel', null);
-  await waitFor(
-    () => sink.events.some((e) => e.type === 'message' && String(e.text).includes('after cancel')),
-    { label: 'usable after cancel' },
-  );
-});
-
-test('gemini sessions report that they cannot ask for approval', async (t) => {
-  const h = await buildHarness();
-  t.after(() => h.close());
-
-  const session = await h.sessions.create({ workspaceId: 'repo', adapterId: 'gemini-cli', createdBy: null });
-  assert.equal(session.summary().supportsPermissionPrompts, false);
-  await assert.rejects(
-    () => session.respondToPermission('whatever', 'allow', 'tester'),
-    /no pending approval/,
-  );
+  assert.equal(listed.agents.find((a) => a.id === 'antigravity-cli').available, false);
 });
 
 // ----------------------------------------------------------- permissions
@@ -341,7 +203,7 @@ test('approvals travel over the websocket', async (t) => {
 
   await waitFor(() => messages.find((m) => m.t === 'welcome'), { label: 'welcome' });
   const welcome = messages.find((m) => m.t === 'welcome');
-  assert.ok(welcome.agents.some((a) => a.id === 'gemini-cli'), 'the picker is fed from the welcome frame');
+  assert.ok(welcome.agents.some((a) => a.id === 'antigravity-cli'), 'the picker is fed from the welcome frame');
 
   const created = await h.app.inject({ method: 'POST', url: '/api/sessions', payload: { workspaceId: 'repo' } });
   const sessionId = created.json().session.id;

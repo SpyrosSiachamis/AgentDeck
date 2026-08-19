@@ -1,14 +1,13 @@
 # Testing
 
 ```bash
-npm test           # 57 automated tests, no API calls, a few seconds
+npm test           # automated tests, no API calls, a few seconds
 npm run test:live  # full lifecycle against the real CLI (spends tokens)
 ```
 
-`npm test` builds first, then runs everything under `tests/`. Each CLI is
-replaced by a fake that speaks its real protocol — `tests/fake-cli.mjs` for
-Claude Code and `tests/fake-gemini-cli.mjs` for Gemini — and both can be told to
-stall, crash, flood, emit malformed lines, or ask for permission. The real
+`npm test` builds first, then runs everything under `tests/`. The coding CLI is
+replaced by a fake that speaks its real stream-json protocol (`tests/fake-cli.mjs`)
+and can be told to stall, crash, flood, emit malformed lines, or ask for permission. The real
 adapters do the parsing, so cancellation, crash handling and approvals are
 exercised without spending API calls.
 
@@ -22,7 +21,7 @@ exercised without spending API calls.
   symlinks that point outside the workspace.
 - The registry refuses protected directories (`~`, `/etc`, …), relative paths,
   malformed ids and duplicate ids.
-- The child environment keeps `PATH`/`HOME`/`CLAUDE_CODE_*` and drops API keys,
+- The child environment keeps `PATH`/`HOME`/`ANTIGRAVITY_*`/`AGY_*` and drops API keys,
   cloud credentials, tokens and passwords; explicit opt-in is the only way through.
 
 **Session lifecycle** — `tests/session-lifecycle.test.mjs`
@@ -64,14 +63,10 @@ exercised without spending API calls.
 
 **Agents and approvals** — `tests/agents-permissions.test.mjs`
 
-- Both agents are listed with their real capabilities, and a session runs on the
+- Both agents (Claude Code and Antigravity CLI) are listed with their real capabilities, and a session runs on the
   one that was chosen; sessions on different agents coexist.
 - Unknown, malformed and uninstalled agent ids are refused; an empty id means
   "use the default".
-- Gemini: one process per instruction, no process between turns, the session
-  survives a finished turn, and the second process resumes the same conversation.
-- Gemini: a non-zero exit surfaces its stderr, a missing `result` event still
-  closes the turn, and cancelling kills the process without ending the session.
 - Approvals: granting lets the tool run, denying passes the reason to the model,
   the pending request appears in the session summary, an unanswered request is
   auto-denied, and stale or unknown request ids are rejected.
@@ -116,10 +111,6 @@ full history replays
 It also asserts that every streamed reply reconciles with its final block, which
 is the live guard against the double-render bug.
 
-Last run: **all 38 checks passed**, including the AI writing a file into the
-registered workspace and the process disappearing from the process table after
-the stop request.
-
 ## Manual phone checklist
 
 Things a test harness cannot judge:
@@ -141,5 +132,4 @@ Things a test harness cannot judge:
    keyboard does not cover the send button.
 9. Ask for something that needs approval ("run the test suite"): the card should
    appear with the real command, and nothing should run until you tap Approve.
-10. Start a Gemini session and confirm the picker, the streaming, and that
-    cancelling mid-task returns it to idle.
+10. Confirm streaming output, tool calls, and cancelling mid-task works cleanly.

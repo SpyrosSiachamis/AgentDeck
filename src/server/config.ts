@@ -35,14 +35,16 @@ const envSchema = z.object({
   ALLOWED_TAILSCALE_USERS: z.string().default(''),
 
   /** Which CLI agents are offered, and which one a session gets by default. */
-  CLI_ADAPTERS: z.string().default('claude-code,gemini-cli'),
+  CLI_ADAPTERS: z.string().default('claude-code,antigravity-cli'),
   CLI_DEFAULT_ADAPTER: z.string().default('claude-code'),
 
   /** Per-agent binary and model overrides. */
   CLAUDE_COMMAND: z.string().default(''),
   CLAUDE_MODEL: z.string().default(''),
-  GEMINI_COMMAND: z.string().default(''),
-  GEMINI_MODEL: z.string().default(''),
+  AGY_COMMAND: z.string().default(''),
+  AGY_MODEL: z.string().default(''),
+  ANTIGRAVITY_COMMAND: z.string().default(''),
+  ANTIGRAVITY_MODEL: z.string().default(''),
 
   /** Applied to the default agent when the per-agent variables are unset. */
   CLI_COMMAND: z.string().default(''),
@@ -137,7 +139,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     .filter(Boolean);
   const defaultAdapter = adapters.includes(parsed.CLI_DEFAULT_ADAPTER)
     ? parsed.CLI_DEFAULT_ADAPTER
-    : (adapters[0] ?? 'claude-code');
+    : (adapters[0] ?? 'antigravity-cli');
 
   // The generic CLI_COMMAND/CLI_MODEL apply to the default agent, so a
   // single-agent setup needs no per-agent variables.
@@ -147,8 +149,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (parsed.CLI_MODEL) adapterModels[defaultAdapter] = parsed.CLI_MODEL;
   if (parsed.CLAUDE_COMMAND) adapterCommands['claude-code'] = parsed.CLAUDE_COMMAND;
   if (parsed.CLAUDE_MODEL) adapterModels['claude-code'] = parsed.CLAUDE_MODEL;
-  if (parsed.GEMINI_COMMAND) adapterCommands['gemini-cli'] = parsed.GEMINI_COMMAND;
-  if (parsed.GEMINI_MODEL) adapterModels['gemini-cli'] = parsed.GEMINI_MODEL;
+  const agyCmd = parsed.AGY_COMMAND || parsed.ANTIGRAVITY_COMMAND;
+  const agyModel = parsed.AGY_MODEL || parsed.ANTIGRAVITY_MODEL;
+  if (agyCmd) adapterCommands['antigravity-cli'] = agyCmd;
+  if (agyModel) adapterModels['antigravity-cli'] = agyModel;
 
   return Object.freeze({
     host: parsed.HOST,

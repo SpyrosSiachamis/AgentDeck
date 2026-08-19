@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * A stand-in for the Claude Code CLI that speaks the same stream-json protocol.
+ * A stand-in for the Antigravity CLI (agy) that speaks the stream-json protocol.
  * Tests drive it through the real adapter, so the adapter's parsing, cancel and
  * crash handling are exercised without spending API calls.
  *
@@ -8,18 +8,23 @@
  *   SLOW    - a long turn that only ends on interrupt
  *   TOOL    - emits tool_use + tool_result (Read)
  *   BASH    - emits tool_use + tool_result for Bash (command lifecycle)
+ *   SHELL   - emits tool_use + tool_result for run_command (command lifecycle)
  *   CRASH   - the process exits non-zero mid-turn
  *   FLOOD   - emits a very large amount of output
  *   GARBAGE - emits a line that is not valid JSON
  *   STREAM  - emits partial-message deltas before the final text
  *   ASK     - requests tool permission and waits for the control_response
+ *   FAIL    - exits non-zero after writing to stderr
+ *   NORESULT- finishes turn with no result
  */
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 
 const args = process.argv.slice(2);
+const conversationIndex = args.indexOf('--conversation');
 const resumeIndex = args.indexOf('--resume');
-const sessionId = resumeIndex !== -1 ? args[resumeIndex + 1] : randomUUID();
+const resumePos = conversationIndex !== -1 ? conversationIndex : resumeIndex;
+const sessionId = resumePos !== -1 ? args[resumePos + 1] : randomUUID();
 const modelIndex = args.indexOf('--model');
 const model = modelIndex !== -1 ? args[modelIndex + 1] : 'fake-model-1';
 
@@ -129,9 +134,36 @@ async function runTurn(text) {
     });
   }
 
+  if (text.includes('SHELL')) {
+    const id = `toolu_${randomUUID()}`;
+    emit({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id,
+            name: 'run_command',
+            input: { CommandLine: 'echo hi', description: 'say hi' },
+          },
+        ],
+      },
+    });
+    emit({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: false, content: 'hi\n' }] },
+    });
+  }
+
   if (text.includes('FLOOD')) {
     const chunk = 'x'.repeat(64 * 1024);
     for (let i = 0; i < 64; i++) assistantText(chunk);
+  }
+
+  if (text.includes('FAIL')) {
+    process.stderr.write('Antigravity CLI failed with error.\n');
+    process.exit(41);
   }
 
   if (text.includes('CRASH')) {

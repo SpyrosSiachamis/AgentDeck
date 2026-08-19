@@ -99,13 +99,15 @@ test('child environment excludes secrets and keeps what the CLI needs', () => {
     DATABASE_PASSWORD: 'hunter2',
     MY_PRIVATE_KEY: 'rsa',
     STRIPE_SECRET: 'sk_live',
-    CLAUDE_CODE_SOMETHING: 'ok',
+    ANTIGRAVITY_CONFIG: 'ok',
+    AGY_TELEMETRY: '0',
     RANDOM_APP_VAR: 'not forwarded',
   });
 
   assert.equal(env.PATH, '/usr/bin');
   assert.equal(env.HOME, '/Users/test');
-  assert.equal(env.CLAUDE_CODE_SOMETHING, 'ok');
+  assert.equal(env.ANTIGRAVITY_CONFIG, 'ok');
+  assert.equal(env.AGY_TELEMETRY, '0');
 
   for (const leaked of [
     'ANTHROPIC_API_KEY',

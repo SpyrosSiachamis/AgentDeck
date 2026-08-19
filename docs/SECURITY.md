@@ -61,8 +61,8 @@ At load time, each registered entry is:
 - resolved through `realpath`, collapsing `..` and symlinks,
 - verified to exist and be a directory (missing paths are auto-disabled),
 - rejected if it is a protected location — `/`, your home directory itself,
-  `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`, `~/.claude`, `~/Library`, `/etc`,
-  `/var`, `/usr`, `/bin`, `/sbin`, `/System`.
+  `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`, `~/.claude`, `~/.gemini`, `~/.antigravity`,
+  `~/.agy`, `~/Library`, `/etc`, `/var`, `/usr`, `/bin`, `/sbin`, `/System`.
 
 Ids are constrained to `^[a-z0-9][a-z0-9_-]{0,63}$`, so a path-shaped id
 (`../other`, `/etc`) can never match an entry. Disabled workspaces resolve but
@@ -80,9 +80,9 @@ The server may be launched from a shell full of credentials. The child process
 gets an allowlisted environment instead (`src/server/adapters/env.ts`):
 
 - **Forwarded:** `PATH`, `HOME`, `USER`, `SHELL`, locale, `TMPDIR`, XDG dirs,
-  proxy and CA settings, plus `CLAUDE_CODE_*`, `ANTHROPIC_*`, `GEMINI_*`,
+  proxy and CA settings, plus `ANTIGRAVITY_*`, `AGY_*`, `GEMINI_*`,
   `GOOGLE_*` and `GCLOUD_*` configuration. `GOOGLE_CLOUD_PROJECT` is forwarded
-  because the Gemini CLI requires it for Workspace accounts.
+  because Workspace accounts may require it.
 - **Never forwarded:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`,
   `GOOGLE_CLIENT_SECRET`, and anything matching
@@ -90,8 +90,8 @@ gets an allowlisted environment instead (`src/server/adapters/env.ts`):
 - **Not forwarded by default:** everything else, including your application env
   vars and cloud credentials.
 
-Both CLIs authenticate through their own credential stores under `$HOME`, so
-stripping the API keys does not break them. If you genuinely need a variable inside sessions,
+The CLI authenticates through its own credential stores under `$HOME`, so
+stripping the API keys does not break it. If you genuinely need a variable inside sessions,
 opt in explicitly with `CLI_FORWARD_ENV=NAME1,NAME2` — and understand that the
 AI can read it, including through its Bash tool.
 
@@ -174,10 +174,10 @@ the server log.
 | Level | Behaviour |
 | --- | --- |
 | `default` | Asks before anything risky. You approve or deny it from the phone. |
-| `acceptEdits` | Edits confined to the workspace proceed silently; measured against a live run, this also lets in-workspace shell commands through. |
-| `full` | Never asks (Claude `bypassPermissions`, Gemini `yolo`). |
+| `acceptEdits` | Edits confined to the workspace proceed silently (`acceptEdits` / `--mode accept-edits`). |
+| `full` | Never asks (`bypassPermissions` on Claude, `--dangerously-skip-permissions` on Antigravity). |
 
-With Claude Code the request travels over the CLI's control channel and the turn
+With Claude Code and Antigravity CLI the request travels over the CLI's control channel and the turn
 **blocks** until it is answered, so:
 
 - Only a request the CLI actually raised can be answered; ids are validated
@@ -188,11 +188,6 @@ With Claude Code the request travels over the CLI's control channel and the turn
   rather than leaving the CLI waiting.
 - The decision, who made it, and any reason given are written to the session
   log, so the transcript shows what was authorised and by whom.
-
-The Gemini CLI cannot ask mid-task — its policy is fixed by `--approval-mode`
-at launch — so `default` is treated as `acceptEdits` there and no approval cards
-appear. If you want a human in the loop on every command, use a Claude Code
-session.
 
 ## Operating checklist
 

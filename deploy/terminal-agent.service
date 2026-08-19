@@ -1,0 +1,27 @@
+# systemd user service for terminal-agent
+#
+# 1. Edit WorkingDirectory and ExecStart to match your machine.
+# 2. mkdir -p ~/.config/systemd/user/
+# 3. cp deploy/terminal-agent.service ~/.config/systemd/user/
+# 4. systemctl --user daemon-reload
+# 5. systemctl --user enable --now terminal-agent
+#
+# Runs as your user so the CLI finds your credentials and git repositories.
+
+[Unit]
+Description=Terminal Agent - Remote AI Coding Console
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/terminal-agent
+ExecStart=/usr/bin/node dist/server/index.js
+Restart=always
+RestartSec=5
+Environment=HOST=127.0.0.1
+Environment=PORT=4823
+Environment=REQUIRE_TAILSCALE_IDENTITY=true
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin:%h/.cargo/bin
+
+[Install]
+WantedBy=default.target

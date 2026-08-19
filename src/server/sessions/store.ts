@@ -56,12 +56,34 @@ export class SessionStore {
     return path.join(this.dir(sessionId), 'events.jsonl');
   }
 
+  private readonly writeQueues = new Map<string, Promise<void>>();
+
   async writeMeta(meta: PersistedSession): Promise<void> {
-    const dir = this.dir(meta.id);
-    await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
-    const tmp = path.join(dir, `meta.json.${process.pid}.tmp`);
-    await fsp.writeFile(tmp, JSON.stringify(meta, null, 2), { mode: 0o600 });
-    await fsp.rename(tmp, this.metaPath(meta.id));
+    const queue = this.writeQueues.get(meta.id) ?? Promise.resolve();
+    const next = queue
+      .catch(() => {})
+      .then(async () => {
+        const dir = this.dir(meta.id);
+        await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+        const randomSuffix = Math.random().toString(36).slice(2, 10);
+        const tmp = path.join(dir, `meta.json.${process.pid}.${Date.now()}.${randomSuffix}.tmp`);
+        try {
+          await fsp.writeFile(tmp, JSON.stringify(meta, null, 2), { mode: 0o600 });
+          await fsp.rename(tmp, this.metaPath(meta.id));
+        } catch (err) {
+          await fsp.unlink(tmp).catch(() => {});
+          throw err;
+        }
+      });
+
+    this.writeQueues.set(meta.id, next);
+    try {
+      await next;
+    } finally {
+      if (this.writeQueues.get(meta.id) === next) {
+        this.writeQueues.delete(meta.id);
+      }
+    }
   }
 
   /**

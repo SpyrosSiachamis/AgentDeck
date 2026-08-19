@@ -1,0 +1,50 @@
+# Example Dockerfile for terminal-agent
+#
+# Build with:
+#   docker build -t terminal-agent -f Dockerfile.example .
+#
+# Run with:
+#   docker run -d --name terminal-agent \
+#     --network host \
+#     -v $(pwd)/workspaces.json:/app/workspaces.json:ro \
+#     -v $(pwd)/.data:/app/.data \
+#     -v $HOME/.claude:/root/.claude \
+#     -v $HOME/.gemini:/root/.gemini \
+#     -v $HOME/.antigravity:/root/.antigravity \
+#     -v /path/to/your/code:/root/Code \
+#     terminal-agent
+
+FROM node:22-bookworm-slim AS build
+
+WORKDIR /app
+COPY package*.json tsconfig*.json ./
+COPY scripts ./scripts
+COPY src ./src
+
+RUN npm ci && npm run build
+
+FROM node:22-bookworm-slim
+
+WORKDIR /app
+
+# Install git, curl, ca-certificates (and any other tools you need)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=build /app/dist ./dist
+COPY scripts ./scripts
+
+ENV HOST=127.0.0.1
+ENV PORT=4823
+ENV STATE_DIR=/app/.data
+ENV WORKSPACES_FILE=/app/workspaces.json
+
+EXPOSE 4823
+
+CMD ["node", "dist/server/index.js"]

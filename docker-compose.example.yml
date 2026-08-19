@@ -1,0 +1,39 @@
+# Example Docker Compose configuration for terminal-agent
+#
+# Customize the volume mounts below to point to:
+#   1. Your local repositories directory
+#   2. Your CLI agent authentication directories (~/.claude, ~/.gemini, ~/.antigravity)
+#   3. Your git and ssh credentials (~/.gitconfig, ~/.ssh)
+#
+# Start with:
+#   docker compose -f docker-compose.example.yml up -d
+
+services:
+  terminal-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.example
+    container_name: terminal-agent
+    restart: unless-stopped
+    # Use host network mode so the server binds 127.0.0.1 on the host for Tailscale Serve
+    network_mode: host
+    environment:
+      - HOST=127.0.0.1
+      - PORT=4823
+      - REQUIRE_TAILSCALE_IDENTITY=true
+      - WORKSPACES_FILE=/app/workspaces.json
+      - STATE_DIR=/app/.data
+      - CLI_ADAPTERS=claude-code,antigravity-cli
+      - CLI_DEFAULT_ADAPTER=claude-code
+      - LOG_LEVEL=info
+    volumes:
+      - ./workspaces.json:/app/workspaces.json:ro
+      - ./.data:/app/.data
+      # Mount your host repositories where the AI can work on them
+      - ${HOME}/Code:/root/Code
+      # Mount CLI authentication state so agents are already logged in
+      - ${HOME}/.claude:/root/.claude:ro
+      - ${HOME}/.gemini:/root/.gemini:ro
+      - ${HOME}/.antigravity:/root/.antigravity:ro
+      - ${HOME}/.gitconfig:/root/.gitconfig:ro
+      - ${HOME}/.ssh:/root/.ssh:ro

@@ -78,6 +78,9 @@ function forbiddenRoots(): string[] {
     path.join(home, '.gnupg'),
     path.join(home, '.config'),
     path.join(home, '.claude'),
+    path.join(home, '.gemini'),
+    path.join(home, '.antigravity'),
+    path.join(home, '.agy'),
     path.join(home, 'Library'),
     '/etc',
     '/var',
@@ -106,8 +109,8 @@ export class WorkspaceRegistry {
       raw = await fsp.readFile(file, 'utf8');
     } catch (err) {
       throw new WorkspaceError(
-        `Cannot read workspace registry at ${file}: ${(err as Error).message}. ` +
-          `Copy workspaces.example.json to workspaces.json and list the repositories you want to expose.`,
+        `Cannot read workspace registry at "${file}": ${(err as Error).message}. ` +
+          `Run "npm run setup" or copy workspaces.example.json to workspaces.json to register your repositories.`,
         'invalid_registry',
       );
     }

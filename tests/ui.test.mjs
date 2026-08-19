@@ -93,14 +93,14 @@ const welcome = {
       note: 'One long-lived process per session.',
     },
     {
-      id: 'gemini-cli',
-      displayName: 'Gemini CLI',
-      command: 'gemini',
+      id: 'antigravity-cli',
+      displayName: 'Antigravity CLI',
+      command: 'agy',
       model: null,
       available: true,
-      persistentProcess: false,
+      persistentProcess: true,
       supportsPermissionPrompts: false,
-      note: 'One process per instruction.',
+      note: 'One long-lived process per session.',
     },
   ],
   defaultAgent: 'claude-code',
@@ -109,11 +109,11 @@ const welcome = {
       id: 'sess1',
       workspaceId: 'demo',
       workspaceName: 'Demo Repo',
-      adapterId: 'claude-code',
-      adapterName: 'Claude Code',
+      adapterId: 'antigravity-cli',
+      adapterName: 'Antigravity CLI',
       title: 'Fix the parser',
       state: 'busy',
-      model: 'claude-fable-5',
+      model: 'gemini-3.7-flash',
       createdAt: Date.now() - 60_000,
       updatedAt: Date.now(),
       lastSeq: 4,
@@ -127,8 +127,8 @@ const welcome = {
       id: 'sess0',
       workspaceId: 'demo',
       workspaceName: 'Demo Repo',
-      adapterId: 'gemini-cli',
-      adapterName: 'Gemini CLI',
+      adapterId: 'antigravity-cli',
+      adapterName: 'Antigravity CLI',
       title: 'Yesterday',
       state: 'exited',
       model: null,
@@ -356,16 +356,16 @@ test('picking a workspace offers the installed agents', async (t) => {
   const sheet = ui.document.querySelector('.sheet');
   assert.ok(sheet, 'an agent picker opens');
   assert.match(sheet.textContent, /Claude Code/);
-  assert.match(sheet.textContent, /Gemini CLI/);
+  assert.match(sheet.textContent, /Antigravity CLI/);
   assert.match(sheet.textContent, /default/);
 
-  const gemini = [...sheet.querySelectorAll('.card')].find((c) => c.textContent.includes('Gemini CLI'));
-  gemini.click();
+  const agy = [...sheet.querySelectorAll('.card')].find((c) => c.textContent.includes('Antigravity CLI'));
+  agy.click();
   await new Promise((resolve) => setTimeout(resolve, 5));
 
   const call = ui.fetchCalls.find((c) => String(c.url) === '/api/sessions');
   assert.ok(call, 'a session is created');
-  assert.deepEqual(JSON.parse(call.init.body), { workspaceId: 'demo', adapterId: 'gemini-cli' });
+  assert.deepEqual(JSON.parse(call.init.body), { workspaceId: 'demo', adapterId: 'antigravity-cli' });
   assert.equal(ui.document.querySelector('.sheet'), null, 'the sheet closes after choosing');
 });
 

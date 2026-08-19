@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { makeClaudeCodeFactory } from './claude-code.js';
-import { makeGeminiFactory } from './gemini.js';
+import { makeAntigravityFactory } from './antigravity.js';
 import type { AdapterDescriptor, CLIAdapterFactory } from './types.js';
 
 /**
@@ -41,13 +41,13 @@ const DEFINITIONS: readonly AdapterDefinition[] = [
     build: makeClaudeCodeFactory,
   },
   {
-    id: 'gemini-cli',
-    displayName: 'Gemini CLI',
-    defaultCommand: 'gemini',
-    persistentProcess: false,
+    id: 'antigravity-cli',
+    displayName: 'Antigravity CLI',
+    defaultCommand: 'agy',
+    persistentProcess: true,
     supportsPermissionPrompts: false,
-    note: 'Runs one process per instruction and resumes the conversation by id. Its approval policy is fixed at launch, so it never asks mid-task.',
-    build: makeGeminiFactory,
+    note: 'One long-lived process per session. Runs non-interactively with auto-approved permissions.',
+    build: makeAntigravityFactory,
   },
 ];
 

@@ -15,7 +15,6 @@ import { buildServer } from '../dist/server/http.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE_CLI = path.join(here, 'fake-cli.mjs');
-export const FAKE_GEMINI = path.join(here, 'fake-gemini-cli.mjs');
 
 export async function makeTempDir(prefix = 'terminal-agent-test-') {
   return fsp.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -66,8 +65,8 @@ export async function buildHarness(overrides = {}) {
     LOG_LEVEL: 'silent',
     CLAUDE_COMMAND: FAKE_CLI,
     CLAUDE_MODEL: 'fake-model-1',
-    GEMINI_COMMAND: FAKE_GEMINI,
-    GEMINI_MODEL: 'fake-gemini-1',
+    AGY_COMMAND: FAKE_CLI,
+    AGY_MODEL: 'fake-agy-1',
     ...overrides,
   });
 

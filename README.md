@@ -1,8 +1,10 @@
-# terminal-agent
+# DevTunnel
 
 A mobile-first remote development console. It runs on your development machine,
 keeps AI coding CLI sessions alive in the background, and is reachable from your
 phone over your Tailscale tailnet — never from the public internet.
+**AI Development Note**
+This project was built primarily with AI coding agents for personal use. As a result, some parts of the codebase may be rough around the edges and may not follow ideal production-grade practices. The project is actively developed and improved based on real-world use.
 
 ```
 iPhone

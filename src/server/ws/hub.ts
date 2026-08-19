@@ -5,6 +5,7 @@ import type { Identity } from '../auth.js';
 import type { SessionManager } from '../sessions/manager.js';
 import { SessionBusyError, SessionNotRunningError } from '../sessions/session.js';
 import { WorkspaceError, type WorkspaceRegistry } from '../workspaces.js';
+import { AdapterError, type AdapterRegistry } from '../adapters/registry.js';
 import type { SessionEvent } from '../sessions/events.js';
 import { clientMessageSchema, type ServerMessage } from './protocol.js';
 
@@ -32,6 +33,7 @@ class Connection {
       log: Logger;
       sessions: SessionManager;
       workspaces: WorkspaceRegistry;
+      adapters: AdapterRegistry;
     },
   ) {}
 
@@ -110,6 +112,21 @@ class Connection {
             sessionId: msg.sessionId,
             clientMsgId: msg.clientMsgId,
           });
+        }
+        return;
+      }
+
+      case 'permission': {
+        try {
+          const session = this.deps.sessions.requireAuthorized(msg.sessionId);
+          await session.respondToPermission(
+            msg.requestId,
+            msg.decision,
+            this.identity.login ?? 'local user',
+            msg.reason,
+          );
+        } catch (err) {
+          this.sendError(errorCode(err), (err as Error).message, { sessionId: msg.sessionId });
         }
         return;
       }
@@ -205,6 +222,7 @@ export class WebSocketHub {
       log: Logger;
       sessions: SessionManager;
       workspaces: WorkspaceRegistry;
+      adapters: AdapterRegistry;
     },
   ) {
     // Session-level state changes are broadcast to everyone, so the session list
@@ -234,6 +252,8 @@ export class WebSocketHub {
         viaTailscale: identity.viaTailscale,
       },
       workspaces: this.deps.workspaces.listPublic(),
+      agents: this.deps.adapters.list(),
+      defaultAgent: this.deps.adapters.defaultId(),
       sessions: this.deps.sessions.list(),
       limits: {
         maxConcurrentSessions: this.deps.config.maxConcurrentSessions,
@@ -290,6 +310,7 @@ export class WebSocketHub {
 
 function errorCode(err: unknown): string {
   if (err instanceof WorkspaceError) return err.code;
+  if (err instanceof AdapterError) return err.code;
   if (err instanceof SessionBusyError) return err.code;
   if (err instanceof SessionNotRunningError) return err.code;
   const code = (err as { code?: unknown })?.code;

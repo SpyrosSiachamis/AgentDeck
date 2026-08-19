@@ -33,14 +33,35 @@ async function api(path, init) {
   return { status: res.status, body };
 }
 
-function client() {
+/**
+ * A stand-in for the phone. It approves permission requests automatically,
+ * which is what a person tapping "Approve" does — the dedicated approval
+ * checks below assert that the round-trip actually happened.
+ */
+function client({ autoApprove = true } = {}) {
   const socket = new WebSocket(wsUrl);
   const messages = [];
   const events = [];
+  const permissions = [];
   socket.on('message', (data) => {
     const msg = JSON.parse(data.toString());
     messages.push(msg);
-    if (msg.t === 'events') events.push(...msg.events);
+    if (msg.t !== 'events') return;
+    events.push(...msg.events);
+    for (const event of msg.events) {
+      if (event.type !== 'permission_request') continue;
+      permissions.push(event);
+      if (autoApprove) {
+        socket.send(
+          JSON.stringify({
+            t: 'permission',
+            sessionId: event.sessionId,
+            requestId: event.requestId,
+            decision: 'allow',
+          }),
+        );
+      }
+    }
   });
   const ready = new Promise((resolve, reject) => {
     socket.once('open', resolve);
@@ -50,6 +71,7 @@ function client() {
     socket,
     messages,
     events,
+    permissions,
     ready,
     send: (obj) => socket.send(JSON.stringify(obj)),
     close: () => socket.close(),
@@ -190,6 +212,72 @@ await waitFor(
   'post-cancel reply',
 );
 check(true, 'the same CLI process answers a follow-up instruction after cancellation');
+
+// 9b. Tool approval: ask for something the CLI must get permission for.
+const agents = await api('/api/agents');
+check(agents.body.agents?.length > 0, 'agents endpoint lists installed CLIs',
+  agents.body.agents?.map((a) => `${a.id}${a.available ? '' : ' (missing)'}`).join(', '));
+
+const sessionInfo = (await api(`/api/sessions/${sessionId}`)).body.session;
+if (sessionInfo.supportsPermissionPrompts) {
+  check(
+    phone.permissions.length + phone2.permissions.length > 0,
+    'the CLI asked before running a tool',
+    (phone.permissions[0] ?? phone2.permissions[0])?.summary,
+  );
+
+  // Now deny one explicitly and confirm the refusal reaches the model.
+  const denier = client({ autoApprove: false });
+  await denier.ready;
+  await waitFor(() => denier.messages.find((m) => m.t === 'welcome'), 'welcome (denier)');
+  // Subscribe from the current position: replaying from 0 would re-deliver the
+  // approvals already granted above and the assertions would inspect those.
+  const seqBeforeDeny = (await api(`/api/sessions/${sessionId}`)).body.session.lastSeq;
+  denier.send({ t: 'subscribe', sessionId, sinceSeq: seqBeforeDeny });
+  await waitFor(() => denier.messages.find((m) => m.t === 'subscribed'), 'subscribed (denier)');
+  phone2.socket.close();
+
+  denier.send({
+    t: 'instruct',
+    sessionId,
+    text: 'Use the Bash tool right now to run exactly: rm e2e-proof.txt . Just invoke the tool.',
+  });
+
+  const request = await waitFor(
+    () => denier.permissions.find((p) => p.type === 'permission_request'),
+    'permission_request',
+  );
+  check(true, 'a shell command triggers an approval request', request.command);
+  check(
+    (await api(`/api/sessions/${sessionId}`)).body.session.pendingPermissions.length === 1,
+    'the pending approval is in the session summary, so a reconnecting phone sees it',
+  );
+
+  denier.send({ t: 'permission', sessionId, requestId: request.requestId, decision: 'deny', reason: 'Not this time.' });
+  await waitFor(() => denier.events.some((e) => e.type === 'permission_resolved'), 'permission_resolved');
+  check(true, 'the deny decision reached the CLI');
+  await waitFor(() => denier.events.some((e) => e.type === 'turn_finished'), 'turn finished after deny');
+  const resolved = denier.events.find((e) => e.type === 'permission_resolved');
+  check(resolved.decision === 'deny', 'the refusal is recorded in the session log', `by ${resolved.decidedBy}`);
+  check(
+    !denier.events.some((e) => e.type === 'command_finished' && e.toolUseId === request.requestId),
+    'the denied command never ran',
+  );
+  denier.socket.close();
+} else {
+  console.log('  (this agent cannot ask for approval; skipping the approval checks)');
+}
+
+// 9c. No duplicate rendering: streamed text and its final block must agree.
+const allEvents = (await api(`/api/sessions/${sessionId}/events?since=0&limit=800`)).body.events;
+const deltaBlocks = new Set(allEvents.filter((e) => e.type === 'message_delta').map((e) => e.blockId));
+const finalBlocks = new Set(allEvents.filter((e) => e.type === 'message').map((e) => e.blockId));
+const orphanedFinals = [...finalBlocks].filter((b) => !deltaBlocks.has(b));
+check(
+  deltaBlocks.size > 0 && orphanedFinals.length === 0,
+  'every streamed reply reconciles with its final block (no double render)',
+  `${deltaBlocks.size} streamed blocks, ${orphanedFinals.length} unmatched finals`,
+);
 
 // 10. Git status reflects the file the CLI created.
 const git = await api(`/api/workspaces/${workspaceId}/git/status`);

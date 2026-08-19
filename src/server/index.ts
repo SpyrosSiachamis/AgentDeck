@@ -1,6 +1,7 @@
 import { loadConfig, isLoopbackHost } from './config.js';
 import { createLogger } from './logger.js';
 import { WorkspaceRegistry } from './workspaces.js';
+import { AdapterRegistry } from './adapters/registry.js';
 import { SessionManager } from './sessions/manager.js';
 import { SessionStore } from './sessions/store.js';
 import { buildServer } from './http.js';
@@ -10,11 +11,23 @@ async function main(): Promise<void> {
   const log = createLogger({ level: config.logLevel, pretty: config.logPretty });
 
   const workspaces = await WorkspaceRegistry.load(config.workspacesFile, log);
+  const adapters = AdapterRegistry.create({
+    enabled: config.adapters,
+    defaultAdapter: config.defaultAdapter,
+    commands: config.adapterCommands,
+    models: config.adapterModels,
+  });
+  for (const adapter of adapters.list()) {
+    const line = { adapter: adapter.id, command: adapter.command, model: adapter.model };
+    if (adapter.available) log.info(line, 'agent available');
+    else log.warn(line, 'agent enabled but its binary was not found on PATH');
+  }
+
   const store = new SessionStore(config.stateDir, log);
-  const sessions = new SessionManager(config, log, workspaces, store);
+  const sessions = new SessionManager(config, log, workspaces, store, adapters);
   await sessions.init();
 
-  const { app, hub } = await buildServer({ config, log, workspaces, sessions });
+  const { app, hub } = await buildServer({ config, log, workspaces, sessions, adapters });
 
   await app.listen({ host: config.host, port: config.port });
 
@@ -22,7 +35,7 @@ async function main(): Promise<void> {
     {
       host: config.host,
       port: config.port,
-      adapter: config.cliAdapter,
+      agents: adapters.list().map((a) => `${a.id}${a.available ? '' : ' (missing)'}`),
       workspaces: workspaces.list().length,
       requireTailscaleIdentity: config.requireTailscaleIdentity,
     },

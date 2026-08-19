@@ -80,14 +80,18 @@ The server may be launched from a shell full of credentials. The child process
 gets an allowlisted environment instead (`src/server/adapters/env.ts`):
 
 - **Forwarded:** `PATH`, `HOME`, `USER`, `SHELL`, locale, `TMPDIR`, XDG dirs,
-  proxy and CA settings, plus `CLAUDE_CODE_*` and `ANTHROPIC_*` configuration.
-- **Never forwarded:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and anything
-  matching `SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|SESSION_TOKEN`.
+  proxy and CA settings, plus `CLAUDE_CODE_*`, `ANTHROPIC_*`, `GEMINI_*`,
+  `GOOGLE_*` and `GCLOUD_*` configuration. `GOOGLE_CLOUD_PROJECT` is forwarded
+  because the Gemini CLI requires it for Workspace accounts.
+- **Never forwarded:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  `GOOGLE_CLIENT_SECRET`, and anything matching
+  `SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|SESSION_TOKEN`.
 - **Not forwarded by default:** everything else, including your application env
   vars and cloud credentials.
 
-The CLI authenticates through its own credential store in `$HOME`, so stripping
-the API key does not break it. If you genuinely need a variable inside sessions,
+Both CLIs authenticate through their own credential stores under `$HOME`, so
+stripping the API keys does not break them. If you genuinely need a variable inside sessions,
 opt in explicitly with `CLI_FORWARD_ENV=NAME1,NAME2` — and understand that the
 AI can read it, including through its Bash tool.
 
@@ -103,6 +107,8 @@ tokens.
 - No filesystem read/write endpoint, and no file browser.
 - No endpoint that accepts a path as a working directory.
 - No git write operations. `git.ts` runs `status`, `diff`, `ls-files` only.
+- No way to choose an agent binary from the browser: the client sends an agent
+  **id**, which is resolved against the enabled, installed set server-side.
 - No way to enumerate or read environment variables.
 
 A test (`tests/api-ws.test.mjs`) asserts these endpoints stay absent.
@@ -122,6 +128,7 @@ A test (`tests/api-ws.test.mjs`) asserts these endpoints stay absent.
 | Idle session | 6 h, then terminated | manager sweep |
 | Dead session retention | 24 h, then evicted and deleted | manager sweep |
 | Invalid WS messages | 10, then the socket is closed | `ws/hub.ts` |
+| Unanswered tool approval | 15 min, then denied | `Session.armPermissionTimeout` |
 
 Every inbound WebSocket frame is validated against a zod schema before it can
 touch session state; unknown types, malformed JSON and binary frames are
@@ -160,13 +167,32 @@ analytics. All rendering uses `textContent`, never `innerHTML`, so CLI output
 cannot inject markup. 5xx responses return a generic message; details stay in
 the server log.
 
-## Permission mode
+## Approving tool use
 
-`CLI_PERMISSION_MODE` decides what the AI may do without asking. A headless
-session cannot answer an interactive prompt, so `acceptEdits` is the practical
-floor. `bypassPermissions` removes the remaining guardrails and lets the AI run
-any command inside the workspace without confirmation — appropriate only for
-repositories where you would accept that from a local terminal session.
+`CLI_PERMISSION_MODE` decides what an agent may do without asking:
+
+| Level | Behaviour |
+| --- | --- |
+| `default` | Asks before anything risky. You approve or deny it from the phone. |
+| `acceptEdits` | Edits confined to the workspace proceed silently; measured against a live run, this also lets in-workspace shell commands through. |
+| `full` | Never asks (Claude `bypassPermissions`, Gemini `yolo`). |
+
+With Claude Code the request travels over the CLI's control channel and the turn
+**blocks** until it is answered, so:
+
+- Only a request the CLI actually raised can be answered; ids are validated
+  against the session's pending set, and answering twice is refused.
+- An unanswered request is auto-denied after `PERMISSION_TIMEOUT_MS`
+  (15 minutes), so a forgotten session cannot pin a blocked process forever.
+- Cancelling, stopping, or losing the process abandons every pending request
+  rather than leaving the CLI waiting.
+- The decision, who made it, and any reason given are written to the session
+  log, so the transcript shows what was authorised and by whom.
+
+The Gemini CLI cannot ask mid-task — its policy is fixed by `--approval-mode`
+at launch — so `default` is treated as `acceptEdits` there and no approval cards
+appear. If you want a human in the loop on every command, use a Claude Code
+session.
 
 ## Operating checklist
 

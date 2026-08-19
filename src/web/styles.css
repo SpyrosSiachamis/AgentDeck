@@ -637,3 +637,123 @@ button {
 .hidden {
   display: none !important;
 }
+
+/* ------------------------------------------------- approval + agent picker */
+
+.permission {
+  align-self: stretch;
+  border: 1px solid color-mix(in srgb, var(--busy) 55%, var(--border));
+  background: color-mix(in srgb, var(--busy) 10%, var(--bg-raised));
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.permission.allowed {
+  border-color: var(--accent-dim);
+  background: var(--bg-raised);
+}
+
+.permission.denied {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: var(--bg-raised);
+}
+
+.permission-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.permission-icon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--busy);
+  color: #1b1200;
+  font-size: 13px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.permission-command {
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.permission-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.permission-actions .btn {
+  flex: 1;
+}
+
+.permission-outcome,
+.permission-pending {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.badge.needs-approval {
+  color: var(--busy);
+  border-color: color-mix(in srgb, var(--busy) 50%, var(--border));
+}
+
+.topbar.awaiting-approval {
+  border-bottom-color: var(--busy);
+}
+
+/* bottom sheet used by the agent picker */
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.5);
+  display: flex;
+  align-items: flex-end;
+  z-index: 60;
+}
+
+.sheet-panel {
+  width: 100%;
+  max-height: 85dvh;
+  overflow-y: auto;
+  background: var(--bg);
+  border-top-left-radius: 18px;
+  border-top-right-radius: 18px;
+  padding: 16px 14px calc(18px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+}
+
+.sheet-title {
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+
+@media (min-width: 700px) {
+  .sheet {
+    align-items: center;
+    justify-content: center;
+  }
+  .sheet-panel {
+    max-width: 460px;
+    border-radius: 18px;
+    border: 1px solid var(--border);
+  }
+}

@@ -2,8 +2,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { buildChildEnv } from './env.js';
 import { truncateText, type SessionEventBody } from '../sessions/events.js';
+import { normalizePermissionMode } from './types.js';
 import type {
   AdapterEventHandler,
+  PermissionDecision,
   AdapterOptions,
   AdapterState,
   AdapterStateHandler,
@@ -29,8 +31,27 @@ const CANCEL_RESULT_SUBTYPES = new Set(['error_during_execution']);
 /** Tools whose invocation is also reported as a shell command lifecycle. */
 const COMMAND_TOOLS = new Set(['Bash', 'BashOutput', 'KillShell']);
 
+/** Values the CLI accepts directly, so provider-specific modes still work. */
+const CLAUDE_NATIVE_MODES = new Set([
+  'default',
+  'acceptEdits',
+  'bypassPermissions',
+  'plan',
+  'manual',
+  'auto',
+  'dontAsk',
+]);
+
+const PERMISSION_FLAG: Record<string, string> = {
+  default: 'default',
+  acceptEdits: 'acceptEdits',
+  full: 'bypassPermissions',
+};
+
 export class ClaudeCodeAdapter implements CLIAdapter {
   readonly id = 'claude-code';
+  /** The CLI asks over its control channel, so approvals are supported. */
+  readonly supportsPermissionPrompts = true;
 
   private child: ChildProcessWithoutNullStreams | null = null;
   private onEvent: AdapterEventHandler = () => {};
@@ -56,6 +77,10 @@ export class ClaudeCodeAdapter implements CLIAdapter {
   private currentMessageId: string | null = null;
   /** tool_use_id -> tool name, so tool_result can be classified. */
   private readonly toolNames = new Map<string, string>();
+  /** message id -> next content block index, to match streamed deltas. */
+  private readonly blockIndexByMessage = new Map<string, number>();
+  /** Permission requests the CLI is waiting on, keyed by its request id. */
+  private readonly pendingPermissions = new Map<string, { toolName: string; input: unknown }>();
   private exitPromise: Promise<void> | null = null;
   private resolveExit: (() => void) | null = null;
 
@@ -97,11 +122,20 @@ export class ClaudeCodeAdapter implements CLIAdapter {
       '--strict-mcp-config',
       '--setting-sources',
       '',
+      // Route tool-permission questions to us over the control channel instead
+      // of a terminal prompt nobody can answer from a phone.
+      '--permission-prompt-tool',
+      'stdio',
     ];
     if (this.options.model) args.push('--model', this.options.model);
-    if (this.options.permissionMode && this.options.permissionMode !== 'default') {
-      args.push('--permission-mode', this.options.permissionMode);
-    }
+
+    const requested = this.options.permissionMode ?? 'default';
+    const mode = CLAUDE_NATIVE_MODES.has(requested)
+      ? requested
+      : (PERMISSION_FLAG[normalizePermissionMode(requested)] ?? 'default');
+    // "default" is the CLI's own default and the mode in which it actually asks
+    // before running a risky tool, so it is left unset rather than passed.
+    if (mode !== 'default') args.push('--permission-mode', mode);
     if (this.options.resumeCliSessionId) args.push('--resume', this.options.resumeCliSessionId);
     return args;
   }
@@ -173,6 +207,7 @@ export class ClaudeCodeAdapter implements CLIAdapter {
           fatal: true,
         });
       }
+      this.failPendingPermissions('the CLI process ended');
       this.emit({
         type: 'session_finished',
         reason: this.terminating ? 'terminated' : clean ? 'exited' : 'crashed',
@@ -379,12 +414,83 @@ export class ClaudeCodeAdapter implements CLIAdapter {
       case 'result':
         this.translateResult(msg);
         return;
-      case 'control_response':
       case 'control_request':
+        this.translateControlRequest(msg);
+        return;
+      case 'control_response':
       case 'rate_limit_event':
         return; // protocol chatter, not user-visible
       default:
         return;
+    }
+  }
+
+  /**
+   * The CLI asks permission by sending us a control_request; the turn blocks
+   * until we answer, so every request must end in exactly one response.
+   */
+  private translateControlRequest(msg: Json): void {
+    const request = msg['request'];
+    const requestId = typeof msg['request_id'] === 'string' ? msg['request_id'] : null;
+    if (!requestId || !request || typeof request !== 'object') return;
+    const req = request as Json;
+    if (req['subtype'] !== 'can_use_tool') return;
+
+    const toolName = String(req['tool_name'] ?? 'tool');
+    const input = req['input'];
+    this.pendingPermissions.set(requestId, { toolName, input });
+
+    const command =
+      input && typeof input === 'object' && typeof (input as Json)['command'] === 'string'
+        ? ((input as Json)['command'] as string)
+        : undefined;
+
+    this.emit({
+      type: 'permission_request',
+      requestId,
+      toolName,
+      displayName: typeof req['display_name'] === 'string' ? (req['display_name'] as string) : toolName,
+      summary: summariseToolInput(toolName, input, 300),
+      command: command ? truncateText(command, 4000).text : undefined,
+      input: compactInput(input, this.options.limits.maxEventTextChars),
+    });
+  }
+
+  async respondToPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) throw new Error('no such pending permission request');
+    const child = this.child;
+    if (!child || child.exitCode !== null) {
+      this.pendingPermissions.delete(requestId);
+      throw new Error('CLI process is not running');
+    }
+
+    const response =
+      decision.decision === 'allow'
+        ? { behavior: 'allow', updatedInput: pending.input }
+        : { behavior: 'deny', message: decision.reason || 'Denied by the user.' };
+
+    await this.write(
+      child,
+      JSON.stringify({
+        type: 'control_response',
+        response: { subtype: 'success', request_id: requestId, response },
+      }) + '\n',
+    );
+    this.pendingPermissions.delete(requestId);
+  }
+
+  /** Deny anything still outstanding so the CLI is never left waiting. */
+  private failPendingPermissions(reason: string): void {
+    for (const requestId of [...this.pendingPermissions.keys()]) {
+      this.pendingPermissions.delete(requestId);
+      this.emit({
+        type: 'permission_resolved',
+        requestId,
+        decision: 'deny',
+        decidedBy: null,
+        reason,
+      });
     }
   }
 
@@ -417,9 +523,17 @@ export class ClaudeCodeAdapter implements CLIAdapter {
     const max = this.options.limits.maxEventTextChars;
     const message = (msg['message'] ?? {}) as Json;
     const messageId = typeof message['id'] === 'string' ? message['id'] : String(msg['uuid'] ?? 'msg');
-    let index = -1;
+
+    // The CLI splits one API message into several `assistant` events, each
+    // carrying a single content block, so a block's position inside the event
+    // is always 0. Streaming deltas, however, are numbered by their true index
+    // within the message. Counting blocks per message id recovers that index —
+    // without it the streamed text and the final text get different block ids
+    // and the UI renders the same reply twice.
+    let index = (this.blockIndexByMessage.get(messageId) ?? 0) - 1;
     for (const block of this.contentBlocks(msg)) {
       index += 1;
+      this.blockIndexByMessage.set(messageId, index + 1);
       const blockType = block['type'];
       if (blockType === 'text') {
         const { text, truncated } = truncateText(String(block['text'] ?? ''), max);
@@ -529,6 +643,8 @@ export class ClaudeCodeAdapter implements CLIAdapter {
       result,
     });
 
+    this.blockIndexByMessage.clear();
+    this.failPendingPermissions('the turn ended before the request was answered');
     if (this.status !== 'exited' && this.status !== 'crashed') this.setStatus('idle');
   }
 

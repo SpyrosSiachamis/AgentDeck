@@ -81,11 +81,36 @@ const welcome = {
     { id: 'demo', name: 'Demo Repo', enabled: true, isGitRepo: true },
     { id: 'old', name: 'Archived', enabled: false, isGitRepo: false },
   ],
+  agents: [
+    {
+      id: 'claude-code',
+      displayName: 'Claude Code',
+      command: 'claude',
+      model: null,
+      available: true,
+      persistentProcess: true,
+      supportsPermissionPrompts: true,
+      note: 'One long-lived process per session.',
+    },
+    {
+      id: 'gemini-cli',
+      displayName: 'Gemini CLI',
+      command: 'gemini',
+      model: null,
+      available: true,
+      persistentProcess: false,
+      supportsPermissionPrompts: false,
+      note: 'One process per instruction.',
+    },
+  ],
+  defaultAgent: 'claude-code',
   sessions: [
     {
       id: 'sess1',
       workspaceId: 'demo',
       workspaceName: 'Demo Repo',
+      adapterId: 'claude-code',
+      adapterName: 'Claude Code',
       title: 'Fix the parser',
       state: 'busy',
       model: 'claude-fable-5',
@@ -95,11 +120,15 @@ const welcome = {
       live: true,
       resumable: false,
       pendingInstructions: 1,
+      pendingPermissions: [],
+      supportsPermissionPrompts: true,
     },
     {
       id: 'sess0',
       workspaceId: 'demo',
       workspaceName: 'Demo Repo',
+      adapterId: 'gemini-cli',
+      adapterName: 'Gemini CLI',
       title: 'Yesterday',
       state: 'exited',
       model: null,
@@ -109,6 +138,8 @@ const welcome = {
       live: false,
       resumable: true,
       pendingInstructions: 0,
+      pendingPermissions: [],
+      supportsPermissionPrompts: false,
     },
   ],
   limits: { maxConcurrentSessions: 4, maxInstructionChars: 32000 },
@@ -310,4 +341,200 @@ test('server errors surface as a toast rather than breaking the view', (t) => {
   assert.ok(toast);
   assert.match(toast.textContent, /Too many queued instructions/);
   assert.ok(ui.document.getElementById('stream'), 'the session view is still mounted');
+});
+
+// --------------------------------------------------------- agents + approvals
+
+test('picking a workspace offers the installed agents', async (t) => {
+  const ui = mountClient(t);
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  const card = [...ui.document.querySelectorAll('.card')].find((c) => c.textContent.includes('Demo Repo'));
+  card.click();
+
+  const sheet = ui.document.querySelector('.sheet');
+  assert.ok(sheet, 'an agent picker opens');
+  assert.match(sheet.textContent, /Claude Code/);
+  assert.match(sheet.textContent, /Gemini CLI/);
+  assert.match(sheet.textContent, /default/);
+
+  const gemini = [...sheet.querySelectorAll('.card')].find((c) => c.textContent.includes('Gemini CLI'));
+  gemini.click();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const call = ui.fetchCalls.find((c) => String(c.url) === '/api/sessions');
+  assert.ok(call, 'a session is created');
+  assert.deepEqual(JSON.parse(call.init.body), { workspaceId: 'demo', adapterId: 'gemini-cli' });
+  assert.equal(ui.document.querySelector('.sheet'), null, 'the sheet closes after choosing');
+});
+
+test('an uninstalled agent is never started', async (t) => {
+  const ui = mountClient(t);
+  ui.socket().open();
+  ui.socket().receive({
+    ...welcome,
+    agents: [welcome.agents[0], { ...welcome.agents[1], available: false }],
+  });
+
+  const card = [...ui.document.querySelectorAll('.card')].find((c) => c.textContent.includes('Demo Repo'));
+  card.click();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  // Only one agent is installed, so there is nothing to choose between and the
+  // session starts on it directly — the missing one is never offered.
+  assert.equal(ui.document.querySelector('.sheet'), null, 'no picker for a single choice');
+  const call = ui.fetchCalls.find((c) => String(c.url) === '/api/sessions');
+  assert.equal(JSON.parse(call.init.body).adapterId, 'claude-code');
+});
+
+test('with no agent installed nothing is started', (t) => {
+  const ui = mountClient(t);
+  ui.socket().open();
+  ui.socket().receive({
+    ...welcome,
+    agents: welcome.agents.map((a) => ({ ...a, available: false })),
+  });
+
+  const card = [...ui.document.querySelectorAll('.card')].find((c) => c.textContent.includes('Demo Repo'));
+  card.click();
+
+  assert.equal(ui.fetchCalls.length, 0, 'no session is created');
+  assert.match(ui.document.querySelector('.toast').textContent, /No coding agent is installed/);
+});
+
+test('a permission request renders approve and deny controls', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      {
+        seq: 1,
+        ts: 1,
+        sessionId: 'sess1',
+        type: 'permission_request',
+        requestId: 'req-1',
+        toolName: 'Bash',
+        displayName: 'Bash',
+        summary: 'rm -rf ./build',
+        command: 'rm -rf ./build',
+        input: { command: 'rm -rf ./build' },
+      },
+    ],
+  });
+
+  const card = ui.document.getElementById('perm-req-1');
+  assert.ok(card, 'an approval card is shown');
+  assert.match(card.textContent, /needs your approval/);
+  assert.match(card.textContent, /rm -rf \.\/build/, 'the exact command is visible');
+
+  const buttons = [...card.querySelectorAll('button')].map((b) => b.textContent);
+  assert.deepEqual(buttons, ['Deny', 'Approve']);
+
+  const approve = [...card.querySelectorAll('button')].find((b) => b.textContent === 'Approve');
+  approve.click();
+
+  const sent = ui.socket().sent.find((m) => m.t === 'permission');
+  assert.deepEqual(sent, { t: 'permission', sessionId: 'sess1', requestId: 'req-1', decision: 'allow' });
+  assert.match(card.textContent, /Sending…/, 'the controls are replaced once answered');
+});
+
+test('denying sends a deny decision and the outcome is shown when confirmed', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 1, ts: 1, sessionId: 'sess1', type: 'permission_request', requestId: 'req-2', toolName: 'Bash', displayName: 'Bash', summary: 'curl evil.example', command: 'curl evil.example' },
+    ],
+  });
+
+  const card = ui.document.getElementById('perm-req-2');
+  [...card.querySelectorAll('button')].find((b) => b.textContent === 'Deny').click();
+  assert.equal(ui.socket().sent.find((m) => m.t === 'permission').decision, 'deny');
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 2, ts: 2, sessionId: 'sess1', type: 'permission_resolved', requestId: 'req-2', decision: 'deny', decidedBy: 'owner@example.com' },
+    ],
+  });
+
+  assert.ok(card.classList.contains('denied'));
+  assert.match(card.textContent, /Denied by owner@example.com/);
+});
+
+test('a replayed approval that was already answered shows as resolved', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  // Exactly what a reconnecting phone receives: request then resolution.
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 1, ts: 1, sessionId: 'sess1', type: 'permission_request', requestId: 'req-3', toolName: 'Bash', displayName: 'Bash', summary: 'ls', command: 'ls' },
+      { seq: 2, ts: 2, sessionId: 'sess1', type: 'permission_resolved', requestId: 'req-3', decision: 'allow', decidedBy: 'owner@example.com' },
+    ],
+  });
+
+  const card = ui.document.getElementById('perm-req-3');
+  assert.ok(card.classList.contains('allowed'));
+  assert.match(card.textContent, /Approved by owner@example.com/);
+  assert.equal(card.querySelectorAll('button').length, 0, 'no stale buttons after a reconnect');
+});
+
+test('a shell command renders once, not as both a tool and a command', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 1, ts: 1, sessionId: 'sess1', type: 'tool_use', toolUseId: 'b1', name: 'Bash', summary: 'npm test', input: { command: 'npm test' } },
+      { seq: 2, ts: 2, sessionId: 'sess1', type: 'command_started', toolUseId: 'b1', command: 'npm test', description: 'run tests' },
+    ],
+  });
+
+  const stream = ui.document.getElementById('stream');
+  assert.equal(stream.querySelectorAll('.event').length, 1, 'one entry per command, not two');
+  assert.equal(ui.document.getElementById('tool-b1'), null, 'the tool node was upgraded, not duplicated');
+  assert.ok(ui.document.getElementById('cmd-b1'));
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 3, ts: 3, sessionId: 'sess1', type: 'command_finished', toolUseId: 'b1', isError: false, output: 'all tests passed' },
+    ],
+  });
+  assert.match(ui.document.getElementById('cmd-b1').textContent, /all tests passed/);
+  assert.equal(stream.querySelectorAll('.event').length, 1);
+});
+
+test('a session waiting on approval says so in the header', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  ui.socket().receive({
+    t: 'session',
+    session: {
+      ...welcome.sessions[0],
+      pendingPermissions: [{ requestId: 'req-9', toolName: 'Bash', summary: 'rm x', command: 'rm x', requestedAt: Date.now() }],
+    },
+  });
+
+  assert.match(ui.document.querySelector('.topbar .subtitle').textContent, /waiting for your approval/);
+  assert.ok(ui.document.querySelector('.topbar').classList.contains('awaiting-approval'));
 });

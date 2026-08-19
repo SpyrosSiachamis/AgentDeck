@@ -53,6 +53,38 @@ test('session runs a turn and emits translated events', async (t) => {
   });
 });
 
+test('streamed text and the final message share a block id (no double render)', async (t) => {
+  const h = await buildHarness();
+  t.after(() => h.close());
+
+  const session = await h.sessions.create({ workspaceId: 'repo', createdBy: null });
+  const sink = collectEvents(session);
+  await waitFor(() => session.summary().state === 'idle');
+
+  await session.instruct('STREAM please', null);
+  await waitFor(() => sink.types().includes('turn_finished'), { label: 'turn_finished' });
+
+  const textDeltas = sink.events.filter((e) => e.type === 'message_delta');
+  const streamedText = textDeltas.map((e) => e.text).join('');
+  const finalText = sink.events.filter((e) => e.type === 'message' && e.text === streamedText);
+  const thinkDeltas = sink.events.filter((e) => e.type === 'thinking_delta');
+  const finalThink = sink.events.filter((e) => e.type === 'thinking');
+
+  assert.ok(textDeltas.length > 1, 'the reply streamed in pieces');
+  assert.equal(finalText.length, 1, 'the streamed reply is finalised exactly once');
+  assert.equal(
+    finalText[0].blockId,
+    textDeltas[0].blockId,
+    'the final message must reuse the streamed block id, or the UI renders it twice',
+  );
+  assert.equal(
+    finalThink[0].blockId,
+    thinkDeltas[0].blockId,
+    'thinking blocks must reconcile the same way',
+  );
+  assert.notEqual(finalText[0].blockId, finalThink[0].blockId, 'text and thinking stay distinct blocks');
+});
+
 test('cancel interrupts the turn but keeps the process usable', async (t) => {
   const h = await buildHarness();
   t.after(() => h.close());
@@ -158,7 +190,7 @@ test('history survives a server restart and sessions come back as orphaned', asy
   await session.instruct('remember me', null);
   await waitFor(() => session.summary().state === 'idle' && session.lastSeq > 3);
   const { id, lastSeq } = session.summary();
-  session.flushPersist();
+  await session.flushPersist();
 
   // Simulate a backend restart against the same state directory.
   const { SessionManager } = await import('../dist/server/sessions/manager.js');
@@ -166,7 +198,7 @@ test('history survives a server restart and sessions come back as orphaned', asy
   await h.sessions.shutdown();
 
   const store2 = new SessionStore(h.config.stateDir, h.log);
-  const manager2 = new SessionManager(h.config, h.log, h.workspaces, store2);
+  const manager2 = new SessionManager(h.config, h.log, h.workspaces, store2, h.adapters);
   await manager2.init();
   t.after(async () => {
     await manager2.shutdown();
@@ -194,7 +226,7 @@ test('restored sessions never reuse sequence numbers already on disk', async (t)
   await session.instruct('TOOL BASH first', null);
   await waitFor(() => session.summary().state === 'idle' && session.lastSeq > 5);
   const { id } = session.summary();
-  session.flushPersist();
+  await session.flushPersist();
   await h.sessions.shutdown();
 
   const { SessionManager } = await import('../dist/server/sessions/manager.js');
@@ -205,11 +237,17 @@ test('restored sessions never reuse sequence numbers already on disk', async (t)
   const store = new SessionStore(h.config.stateDir, h.log);
   const metaPath = store.metaPath(id);
   const meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'));
-  const seqOnDisk = meta.lastSeq;
+
+  // The event log is the authority, so the expectation comes from the log.
+  const logged = (await fsp.readFile(store.eventsPath(id), 'utf8'))
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line).seq);
+  const seqOnDisk = Math.max(...logged);
   assert.ok(seqOnDisk > 2, 'the log has more than a couple of events');
   await fsp.writeFile(metaPath, JSON.stringify({ ...meta, lastSeq: 2 }));
 
-  const manager = new SessionManager(h.config, h.log, h.workspaces, store);
+  const manager = new SessionManager(h.config, h.log, h.workspaces, store, h.adapters);
   await manager.init();
   t.after(async () => {
     await manager.shutdown();
@@ -223,7 +261,7 @@ test('restored sessions never reuse sequence numbers already on disk', async (t)
   await waitFor(() => manager.get(id).summary().state === 'idle');
   await restored.instruct('second run', null);
   await waitFor(() => restored.summary().state === 'idle' && restored.summary().pendingInstructions === 0);
-  restored.flushPersist();
+  await restored.flushPersist();
   await new Promise((r) => setTimeout(r, 150));
 
   const log = await fsp.readFile(store.eventsPath(id), 'utf8');

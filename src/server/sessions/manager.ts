@@ -2,8 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import { WorkspaceError, type WorkspaceRegistry } from '../workspaces.js';
-import { createAdapterFactory } from '../adapters/registry.js';
-import type { CLIAdapterFactory } from '../adapters/types.js';
+import { AdapterError, AdapterRegistry } from '../adapters/registry.js';
 import { DEFAULT_TITLE, Session, type SessionSummary } from './session.js';
 import { SessionStore, type PersistedSession } from './store.js';
 
@@ -16,6 +15,8 @@ export class SessionNotFoundError extends Error {
 
 export type CreateSessionInput = {
   workspaceId: string;
+  /** Which CLI agent runs this session. Defaults to the configured agent. */
+  adapterId?: string | null;
   title?: string;
   model?: string | null;
   permissionMode?: string | null;
@@ -24,7 +25,6 @@ export type CreateSessionInput = {
 
 export class SessionManager {
   private readonly sessions = new Map<string, Session>();
-  private readonly factory: CLIAdapterFactory;
   private sweepTimer: NodeJS.Timeout | null = null;
   private readonly globalStateListeners = new Set<(summary: SessionSummary) => void>();
   private shuttingDown = false;
@@ -34,9 +34,8 @@ export class SessionManager {
     private readonly log: Logger,
     private readonly workspaces: WorkspaceRegistry,
     private readonly store: SessionStore,
-  ) {
-    this.factory = createAdapterFactory(config.cliAdapter, config.cliCommand);
-  }
+    private readonly adapters: AdapterRegistry,
+  ) {}
 
   async init(): Promise<void> {
     await this.store.init();
@@ -66,8 +65,19 @@ export class SessionManager {
         );
         continue;
       }
+      const adapterId = meta.adapterId || this.adapters.defaultId();
+      if (!this.adapters.factory(adapterId)) {
+        this.log.warn(
+          { sessionId: meta.id, adapterId },
+          'session references an agent that is no longer enabled; skipping',
+        );
+        continue;
+      }
       const seqFloor = await this.store.lastSeqOnDisk(meta.id);
-      this.sessions.set(meta.id, this.buildSession(meta.id, workspace, meta, undefined, seqFloor));
+      this.sessions.set(
+        meta.id,
+        this.buildSession(meta.id, workspace, adapterId, meta, undefined, seqFloor),
+      );
       restored += 1;
     }
     if (restored) this.log.info({ restored }, 'restored persisted sessions');
@@ -76,19 +86,33 @@ export class SessionManager {
   private buildSession(
     id: string,
     workspace: ReturnType<WorkspaceRegistry['require']>,
+    adapterId: string,
     restored?: PersistedSession,
     fresh?: Partial<CreateSessionInput>,
     restoredSeqFloor = 0,
   ): Session {
+    const factory = this.adapters.factory(adapterId);
+    if (!factory) throw new AdapterError(`Unknown agent: ${adapterId}`, 'unknown_adapter');
+
     const session = new Session(
       id,
       workspace,
-      { config: this.config, log: this.log, store: this.store, factory: this.factory },
+      {
+        config: this.config,
+        log: this.log,
+        store: this.store,
+        factory,
+        adapterName: this.adapters.displayName(adapterId),
+      },
       {
         title: restored?.title ?? fresh?.title ?? DEFAULT_TITLE,
         createdAt: restored?.createdAt ?? Date.now(),
         createdBy: restored?.createdBy ?? fresh?.createdBy ?? null,
-        model: restored?.model ?? fresh?.model ?? workspace.model ?? (this.config.cliModel || null),
+        model:
+          restored?.model ??
+          fresh?.model ??
+          workspace.model ??
+          this.adapters.modelFor(adapterId),
         permissionMode:
           restored?.permissionMode ??
           fresh?.permissionMode ??
@@ -117,6 +141,9 @@ export class SessionManager {
     if (this.shuttingDown) throw new Error('server is shutting down');
     // Throws for unknown or disabled ids; a path can never reach this point.
     const workspace = this.workspaces.require(input.workspaceId);
+    // Throws when the agent is unknown, disabled, or not installed.
+    const adapterId = input.adapterId || workspace.adapterId || this.adapters.defaultId();
+    this.adapters.require(adapterId);
 
     if (this.liveCount >= this.config.maxConcurrentSessions) {
       throw new SessionLimitError(
@@ -125,7 +152,7 @@ export class SessionManager {
     }
 
     const id = randomBytes(9).toString('base64url');
-    const session = this.buildSession(id, workspace, undefined, input);
+    const session = this.buildSession(id, workspace, adapterId, undefined, input);
     this.sessions.set(id, session);
 
     try {
@@ -135,7 +162,7 @@ export class SessionManager {
       throw err;
     }
     this.log.info(
-      { sessionId: id, workspaceId: workspace.id, createdBy: input.createdBy },
+      { sessionId: id, workspaceId: workspace.id, adapterId, createdBy: input.createdBy },
       'session started',
     );
     return session;
@@ -173,6 +200,7 @@ export class SessionManager {
   async resume(id: string): Promise<Session> {
     const session = this.requireAuthorized(id);
     if (session.live) return session;
+    this.adapters.require(session.adapterId);
     if (this.liveCount >= this.config.maxConcurrentSessions) {
       throw new SessionLimitError(
         `Maximum of ${this.config.maxConcurrentSessions} concurrent sessions reached. Stop one first.`,
@@ -192,7 +220,7 @@ export class SessionManager {
   async remove(id: string): Promise<void> {
     const session = this.get(id);
     await session.terminate('deleted');
-    session.flushPersist();
+    await session.flushPersist();
     this.sessions.delete(id);
     await this.store.remove(id).catch(() => {});
   }
@@ -217,7 +245,7 @@ export class SessionManager {
 
       if (!session.live && session.idleForMs > this.config.sessionRetentionMs) {
         this.log.info({ sessionId: id }, 'evicting expired session');
-        session.flushPersist();
+        void session.flushPersist();
         this.sessions.delete(id);
         void this.store.remove(id).catch(() => {});
       }
@@ -230,13 +258,9 @@ export class SessionManager {
     const live = [...this.sessions.values()].filter((s) => s.live);
     this.log.info({ sessions: live.length }, 'terminating live sessions');
     await Promise.allSettled(live.map((s) => s.terminate('server shutdown')));
-    // Metadata writes must complete before the process exits, or a restored
-    // session would resume from a stale sequence number.
-    await Promise.allSettled(
-      [...this.sessions.values()].map((session) => {
-        session.flushPersist();
-        return session.persistMeta();
-      }),
-    );
+    // Flush the event logs first, then write metadata, so the recorded lastSeq
+    // reflects every event that actually made it to disk.
+    await Promise.allSettled([...this.sessions.values()].map((session) => session.flushPersist()));
+    await Promise.allSettled([...this.sessions.values()].map((session) => session.persistMeta()));
   }
 }

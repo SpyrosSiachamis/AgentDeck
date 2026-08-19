@@ -64,14 +64,20 @@ export class SessionStore {
     await fsp.rename(tmp, this.metaPath(meta.id));
   }
 
-  /** Fire-and-forget append; event loss on a hard crash is acceptable here. */
-  appendEvents(sessionId: string, events: SessionEvent[]): void {
+  /**
+   * Append events to the session log. The promise resolves once the bytes are
+   * handed to the OS, so shutdown can wait for it — otherwise the final batch
+   * can be lost and the log would fall behind the metadata.
+   */
+  async appendEvents(sessionId: string, events: SessionEvent[]): Promise<void> {
     if (events.length === 0) return;
     const file = this.eventsPath(sessionId);
     const payload = events.map((e) => JSON.stringify(e)).join('\n') + '\n';
-    fs.appendFile(file, payload, { mode: 0o600 }, (err) => {
-      if (err) this.log.warn({ sessionId, err: err.message }, 'failed to append session events');
-    });
+    try {
+      await fsp.appendFile(file, payload, { mode: 0o600 });
+    } catch (err) {
+      this.log.warn({ sessionId, err: (err as Error).message }, 'failed to append session events');
+    }
   }
 
   async listMeta(): Promise<PersistedSession[]> {

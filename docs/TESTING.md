@@ -1,14 +1,16 @@
 # Testing
 
 ```bash
-npm test           # 36 automated tests, no API calls, a few seconds
+npm test           # 57 automated tests, no API calls, a few seconds
 npm run test:live  # full lifecycle against the real CLI (spends tokens)
 ```
 
-`npm test` builds first, then runs everything under `tests/`. The CLI is
-replaced by `tests/fake-cli.mjs`, which speaks the same stream-json protocol and
-can be told to stall, crash, flood, or emit malformed lines — so the adapter's
-real parsing, cancellation and crash handling are exercised without API calls.
+`npm test` builds first, then runs everything under `tests/`. Each CLI is
+replaced by a fake that speaks its real protocol — `tests/fake-cli.mjs` for
+Claude Code and `tests/fake-gemini-cli.mjs` for Gemini — and both can be told to
+stall, crash, flood, emit malformed lines, or ask for permission. The real
+adapters do the parsing, so cancellation, crash handling and approvals are
+exercised without spending API calls.
 
 ## What is covered
 
@@ -40,6 +42,8 @@ real parsing, cancellation and crash handling are exercised without API calls.
 - Sessions cannot be created for unregistered or disabled workspaces.
 - Oversized output terminates the session; oversized single events are truncated.
 - Malformed lines from the CLI are reported without killing the session.
+- Streamed text and the final message share a block id, so a reply cannot render
+  twice (this was a real bug, caught against the live CLI).
 
 **API and WebSocket** — `tests/api-ws.test.mjs`
 
@@ -58,6 +62,22 @@ real parsing, cancellation and crash handling are exercised without API calls.
 - Instruction length caps.
 - The absence of shell and filesystem endpoints.
 
+**Agents and approvals** — `tests/agents-permissions.test.mjs`
+
+- Both agents are listed with their real capabilities, and a session runs on the
+  one that was chosen; sessions on different agents coexist.
+- Unknown, malformed and uninstalled agent ids are refused; an empty id means
+  "use the default".
+- Gemini: one process per instruction, no process between turns, the session
+  survives a finished turn, and the second process resumes the same conversation.
+- Gemini: a non-zero exit surfaces its stderr, a missing `result` event still
+  closes the turn, and cancelling kills the process without ending the session.
+- Approvals: granting lets the tool run, denying passes the reason to the model,
+  the pending request appears in the session summary, an unanswered request is
+  auto-denied, and stale or unknown request ids are rejected.
+- Approvals travel over the WebSocket, and a malformed decision is rejected by
+  schema validation.
+
 **Client** — `tests/ui.test.mjs`
 
 The built bundle runs in jsdom against recorded server frames:
@@ -71,6 +91,12 @@ The built bundle runs in jsdom against recorded server frames:
 - A dead session shows Reconnect instead of a composer, and calls `/resume`
   without claiming a JSON body.
 - State updates never wipe the transcript; server errors surface as a toast.
+- The agent picker lists installed agents, skips itself when there is only one
+  choice, and refuses to start anything when none is installed.
+- An approval renders Approve/Deny with the exact command, sends the decision,
+  and shows the outcome — including for a request already answered before a
+  reconnect, which must not show stale buttons.
+- A shell command renders as one entry, not as both a tool and a command.
 
 ## The live end-to-end run
 
@@ -82,11 +108,15 @@ health → workspace list → rejected traversal attempts → create session →
 subscribe → instruct → streamed output → tool events → turn finishes →
 second instruction → phone disconnects mid-work → CLI keeps running →
 reconnect → replay only unseen events → cancel → same process answers again →
+approve a tool request → deny one and confirm it did not run →
 git status/diff → stop → verify the OS reaped the process → resume →
 full history replays
 ```
 
-Last run: **all 32 checks passed**, including the AI writing a file into the
+It also asserts that every streamed reply reconciles with its final block, which
+is the live guard against the double-render bug.
+
+Last run: **all 38 checks passed**, including the AI writing a file into the
 registered workspace and the process disappearing from the process table after
 the stop request.
 
@@ -109,3 +139,7 @@ Things a test harness cannot judge:
    verified live, including the model still remembering the conversation.
 8. Confirm the composer does not zoom the viewport when focused, and that the
    keyboard does not cover the send button.
+9. Ask for something that needs approval ("run the test suite"): the card should
+   appear with the real command, and nothing should run until you tap Approve.
+10. Start a Gemini session and confirm the picker, the streaming, and that
+    cancelling mid-task returns it to idle.

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { SessionEvent } from '../sessions/events.js';
 import type { SessionSummary } from '../sessions/session.js';
 import type { PublicWorkspace } from '../workspaces.js';
+import type { AdapterDescriptor } from '../adapters/types.js';
 
 /** Every inbound frame is validated before it can touch session state. */
 export const clientMessageSchema = z.discriminatedUnion('t', [
@@ -19,6 +20,13 @@ export const clientMessageSchema = z.discriminatedUnion('t', [
     clientMsgId: z.string().min(1).max(64).optional(),
   }),
   z.object({ t: z.literal('cancel'), sessionId: z.string().min(1).max(64) }),
+  z.object({
+    t: z.literal('permission'),
+    sessionId: z.string().min(1).max(64),
+    requestId: z.string().min(1).max(128),
+    decision: z.enum(['allow', 'deny']),
+    reason: z.string().max(500).optional(),
+  }),
   z.object({ t: z.literal('list_sessions') }),
 ]);
 
@@ -29,6 +37,8 @@ export type ServerMessage =
       t: 'welcome';
       identity: { login: string | null; displayName: string | null; viaTailscale: boolean };
       workspaces: PublicWorkspace[];
+      agents: AdapterDescriptor[];
+      defaultAgent: string;
       sessions: SessionSummary[];
       limits: { maxConcurrentSessions: number; maxInstructionChars: number };
       serverTime: number;

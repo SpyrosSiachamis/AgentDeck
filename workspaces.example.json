@@ -11,7 +11,8 @@
       "name": "Side Project",
       "path": "/Users/you/Documents/Code/side-project",
       "enabled": false,
-      "model": "claude-sonnet-5",
+      "adapterId": "gemini-cli",
+      "model": "gemini-2.5-pro",
       "permissionMode": "acceptEdits"
     }
   ]

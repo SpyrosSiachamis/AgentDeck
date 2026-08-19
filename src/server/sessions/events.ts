@@ -16,6 +16,8 @@ export type SessionEventType =
   | 'command_started'
   | 'command_finished'
   | 'turn_finished'
+  | 'permission_request'
+  | 'permission_resolved'
   | 'error'
   | 'session_cancelled'
   | 'session_finished'
@@ -39,6 +41,24 @@ export type SessionEventBody =
       costUsd?: number;
       numTurns?: number;
       result?: string;
+    }
+  | {
+      type: 'permission_request';
+      requestId: string;
+      toolName: string;
+      displayName: string;
+      /** One-line description of what is about to run. */
+      summary: string;
+      /** The command itself when the tool is a shell invocation. */
+      command?: string;
+      input?: unknown;
+    }
+  | {
+      type: 'permission_resolved';
+      requestId: string;
+      decision: 'allow' | 'deny';
+      decidedBy: string | null;
+      reason?: string;
     }
   | { type: 'error'; message: string; detail?: string; fatal: boolean }
   | { type: 'session_cancelled'; reason: string }

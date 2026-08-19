@@ -9,7 +9,13 @@ import type { Logger } from './logger.js';
 import { AuthorizationError, authorize, identityLabel, resolveIdentity, type Identity } from './auth.js';
 import { WorkspaceError, type WorkspaceRegistry } from './workspaces.js';
 import type { SessionManager } from './sessions/manager.js';
-import { SessionBusyError, SessionNotRunningError } from './sessions/session.js';
+import { AdapterError, type AdapterRegistry } from './adapters/registry.js';
+import {
+  PermissionNotFoundError,
+  PermissionUnsupportedError,
+  SessionBusyError,
+  SessionNotRunningError,
+} from './sessions/session.js';
 import { GitService } from './git.js';
 import { WebSocketHub } from './ws/hub.js';
 
@@ -24,6 +30,7 @@ declare module 'fastify' {
 
 const createSessionSchema = z.object({
   workspaceId: z.string().min(1).max(64),
+  adapterId: z.string().min(1).max(64).optional(),
   title: z.string().max(200).optional(),
   model: z.string().max(120).optional(),
 });
@@ -35,12 +42,13 @@ export type AppDeps = {
   log: Logger;
   workspaces: WorkspaceRegistry;
   sessions: SessionManager;
+  adapters: AdapterRegistry;
 };
 
 export async function buildServer(deps: AppDeps) {
-  const { config, log, workspaces, sessions } = deps;
+  const { config, log, workspaces, sessions, adapters } = deps;
   const git = new GitService(config, workspaces);
-  const hub = new WebSocketHub({ config, log, sessions, workspaces });
+  const hub = new WebSocketHub({ config, log, sessions, workspaces, adapters });
 
   const app = Fastify({
     loggerInstance: log,
@@ -118,7 +126,7 @@ export async function buildServer(deps: AppDeps) {
     uptimeSec: Math.round(process.uptime()),
     sessions: { live: sessions.liveCount, total: sessions.list().length },
     workspaces: workspaces.list().length,
-    adapter: config.cliAdapter,
+    agents: adapters.list().map((a) => ({ id: a.id, available: a.available })),
     version: process.env.npm_package_version ?? '0.1.0',
   }));
 
@@ -137,12 +145,15 @@ export async function buildServer(deps: AppDeps) {
 
   app.get('/api/workspaces', async () => ({ workspaces: workspaces.listPublic() }));
 
+  app.get('/api/agents', async () => ({ agents: adapters.list(), defaultAgent: adapters.defaultId() }));
+
   app.get('/api/sessions', async () => ({ sessions: sessions.list() }));
 
   app.post('/api/sessions', async (req, reply) => {
     const body = createSessionSchema.parse(req.body);
     const session = await sessions.create({
       workspaceId: body.workspaceId,
+      adapterId: body.adapterId ?? null,
       title: body.title,
       model: body.model ?? null,
       createdBy: identityLabel(req.identity),
@@ -175,6 +186,21 @@ export async function buildServer(deps: AppDeps) {
     const session = sessions.requireAuthorized(id);
     const instructionId = await session.instruct(body.text, identityLabel(req.identity));
     return { instructionId, session: session.summary() };
+  });
+
+  app.post('/api/sessions/:id/permissions/:requestId', async (req) => {
+    const { id, requestId } = req.params as { id: string; requestId: string };
+    const body = z
+      .object({ decision: z.enum(['allow', 'deny']), reason: z.string().max(500).optional() })
+      .parse(req.body);
+    const session = sessions.requireAuthorized(id);
+    const resolved = await session.respondToPermission(
+      requestId,
+      body.decision,
+      identityLabel(req.identity),
+      body.reason,
+    );
+    return { resolved, session: session.summary() };
   });
 
   app.post('/api/sessions/:id/cancel', async (req) => {
@@ -238,8 +264,10 @@ export async function buildServer(deps: AppDeps) {
 
 function errorCode(err: unknown): string {
   if (err instanceof WorkspaceError) return err.code;
+  if (err instanceof AdapterError) return err.code;
   if (err instanceof AuthorizationError) return 'forbidden';
   if (err instanceof SessionBusyError || err instanceof SessionNotRunningError) return err.code;
+  if (err instanceof PermissionNotFoundError || err instanceof PermissionUnsupportedError) return err.code;
   if (err instanceof z.ZodError) return 'invalid_request';
   const code = (err as { code?: unknown })?.code;
   return typeof code === 'string' ? code : 'error';
@@ -249,8 +277,11 @@ function mapErrorStatus(err: unknown): number {
   if (err instanceof AuthorizationError) return err.status;
   if (err instanceof z.ZodError) return 400;
   if (err instanceof WorkspaceError) return err.code === 'unknown_workspace' ? 404 : 403;
+  if (err instanceof AdapterError) return err.code === 'unknown_adapter' ? 404 : 409;
   if (err instanceof SessionBusyError) return 429;
   if (err instanceof SessionNotRunningError) return 409;
+  if (err instanceof PermissionNotFoundError) return 404;
+  if (err instanceof PermissionUnsupportedError) return 409;
   const code = (err as { code?: unknown })?.code;
   if (code === 'session_not_found') return 404;
   if (code === 'session_limit') return 429;

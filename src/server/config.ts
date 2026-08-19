@@ -34,13 +34,25 @@ const envSchema = z.object({
   /** Comma-separated list of allowed Tailscale logins. Empty = allow any tailnet user. */
   ALLOWED_TAILSCALE_USERS: z.string().default(''),
 
-  /** CLI adapter selection and behaviour. */
-  CLI_ADAPTER: z.string().default('claude-code'),
-  CLI_COMMAND: z.string().default('claude'),
+  /** Which CLI agents are offered, and which one a session gets by default. */
+  CLI_ADAPTERS: z.string().default('claude-code,gemini-cli'),
+  CLI_DEFAULT_ADAPTER: z.string().default('claude-code'),
+
+  /** Per-agent binary and model overrides. */
+  CLAUDE_COMMAND: z.string().default(''),
+  CLAUDE_MODEL: z.string().default(''),
+  GEMINI_COMMAND: z.string().default(''),
+  GEMINI_MODEL: z.string().default(''),
+
+  /** Applied to the default agent when the per-agent variables are unset. */
+  CLI_COMMAND: z.string().default(''),
   CLI_MODEL: z.string().default(''),
-  CLI_PERMISSION_MODE: z
-    .enum(['default', 'acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'])
-    .default('acceptEdits'),
+
+  /**
+   * Provider-neutral permission level: default (ask, unusable headless),
+   * acceptEdits, or full. Provider-native names are accepted as aliases.
+   */
+  CLI_PERMISSION_MODE: z.string().default('default'),
 
   MAX_CONCURRENT_SESSIONS: int(4, 1, 32),
   /** Kill a session that has been idle (no instruction, no output) for this long. */
@@ -49,6 +61,8 @@ const envSchema = z.object({
   TURN_TIMEOUT_MS: int(30 * 60 * 1000, 10_000, 12 * 60 * 60 * 1000),
   /** How long a finished/dead session is retained before it is swept from memory. */
   SESSION_RETENTION_MS: int(24 * 60 * 60 * 1000, 60_000, 30 * 24 * 60 * 60 * 1000),
+  /** Auto-deny a tool approval nobody answers, so a turn cannot hang forever. */
+  PERMISSION_TIMEOUT_MS: int(15 * 60 * 1000, 1_000, 24 * 60 * 60 * 1000),
   /** Grace period between interrupt -> SIGTERM -> SIGKILL. */
   CANCEL_GRACE_MS: int(8_000, 500, 120_000),
   SHUTDOWN_GRACE_MS: int(5_000, 500, 60_000),
@@ -75,14 +89,16 @@ export type Config = Readonly<{
   logPretty: boolean;
   requireTailscaleIdentity: boolean;
   allowedTailscaleUsers: string[];
-  cliAdapter: string;
-  cliCommand: string;
-  cliModel: string;
+  adapters: string[];
+  defaultAdapter: string;
+  adapterCommands: Record<string, string>;
+  adapterModels: Record<string, string>;
   cliPermissionMode: string;
   maxConcurrentSessions: number;
   sessionIdleTimeoutMs: number;
   turnTimeoutMs: number;
   sessionRetentionMs: number;
+  permissionTimeoutMs: number;
   cancelGraceMs: number;
   shutdownGraceMs: number;
   maxInstructionChars: number;
@@ -116,6 +132,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  const adapters = parsed.CLI_ADAPTERS.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const defaultAdapter = adapters.includes(parsed.CLI_DEFAULT_ADAPTER)
+    ? parsed.CLI_DEFAULT_ADAPTER
+    : (adapters[0] ?? 'claude-code');
+
+  // The generic CLI_COMMAND/CLI_MODEL apply to the default agent, so a
+  // single-agent setup needs no per-agent variables.
+  const adapterCommands: Record<string, string> = {};
+  const adapterModels: Record<string, string> = {};
+  if (parsed.CLI_COMMAND) adapterCommands[defaultAdapter] = parsed.CLI_COMMAND;
+  if (parsed.CLI_MODEL) adapterModels[defaultAdapter] = parsed.CLI_MODEL;
+  if (parsed.CLAUDE_COMMAND) adapterCommands['claude-code'] = parsed.CLAUDE_COMMAND;
+  if (parsed.CLAUDE_MODEL) adapterModels['claude-code'] = parsed.CLAUDE_MODEL;
+  if (parsed.GEMINI_COMMAND) adapterCommands['gemini-cli'] = parsed.GEMINI_COMMAND;
+  if (parsed.GEMINI_MODEL) adapterModels['gemini-cli'] = parsed.GEMINI_MODEL;
+
   return Object.freeze({
     host: parsed.HOST,
     port: parsed.PORT,
@@ -128,14 +162,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowedTailscaleUsers: parsed.ALLOWED_TAILSCALE_USERS.split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
-    cliAdapter: parsed.CLI_ADAPTER,
-    cliCommand: parsed.CLI_COMMAND,
-    cliModel: parsed.CLI_MODEL,
+    adapters,
+    defaultAdapter,
+    adapterCommands,
+    adapterModels,
     cliPermissionMode: parsed.CLI_PERMISSION_MODE,
     maxConcurrentSessions: parsed.MAX_CONCURRENT_SESSIONS,
     sessionIdleTimeoutMs: parsed.SESSION_IDLE_TIMEOUT_MS,
     turnTimeoutMs: parsed.TURN_TIMEOUT_MS,
     sessionRetentionMs: parsed.SESSION_RETENTION_MS,
+    permissionTimeoutMs: parsed.PERMISSION_TIMEOUT_MS,
     cancelGraceMs: parsed.CANCEL_GRACE_MS,
     shutdownGraceMs: parsed.SHUTDOWN_GRACE_MS,
     maxInstructionChars: parsed.MAX_INSTRUCTION_CHARS,

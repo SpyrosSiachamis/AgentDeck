@@ -7,10 +7,31 @@
 
 type WorkspaceView = { id: string; name: string; enabled: boolean; isGitRepo: boolean };
 
+type AgentView = {
+  id: string;
+  displayName: string;
+  command: string;
+  model: string | null;
+  available: boolean;
+  persistentProcess: boolean;
+  supportsPermissionPrompts: boolean;
+  note: string;
+};
+
+type PendingPermission = {
+  requestId: string;
+  toolName: string;
+  summary: string;
+  command?: string;
+  requestedAt: number;
+};
+
 type SessionSummary = {
   id: string;
   workspaceId: string;
   workspaceName: string;
+  adapterId: string;
+  adapterName: string;
   title: string;
   state: 'starting' | 'idle' | 'busy' | 'cancelling' | 'exited' | 'crashed' | 'orphaned';
   model: string | null;
@@ -20,13 +41,15 @@ type SessionSummary = {
   live: boolean;
   resumable: boolean;
   pendingInstructions: number;
+  pendingPermissions: PendingPermission[];
+  supportsPermissionPrompts: boolean;
   exit?: { code: number | null; signal: string | null; reason: string } | null;
 };
 
 type SessionEvent = { seq: number; ts: number; sessionId: string; type: string } & Record<string, unknown>;
 
 type ServerMessage =
-  | { t: 'welcome'; identity: { login: string | null; displayName: string | null; viaTailscale: boolean }; workspaces: WorkspaceView[]; sessions: SessionSummary[]; limits: { maxConcurrentSessions: number; maxInstructionChars: number } }
+  | { t: 'welcome'; identity: { login: string | null; displayName: string | null; viaTailscale: boolean }; workspaces: WorkspaceView[]; agents: AgentView[]; defaultAgent: string; sessions: SessionSummary[]; limits: { maxConcurrentSessions: number; maxInstructionChars: number } }
   | { t: 'pong' }
   | { t: 'events'; sessionId: string; events: SessionEvent[] }
   | { t: 'session'; session: SessionSummary }
@@ -41,6 +64,8 @@ const state = {
   conn: 'connecting' as ConnState,
   identity: null as { login: string | null; displayName: string | null; viaTailscale: boolean } | null,
   workspaces: [] as WorkspaceView[],
+  agents: [] as AgentView[],
+  defaultAgent: '',
   sessions: new Map<string, SessionSummary>(),
   /** Highest event sequence rendered per session, for gap-free reconnect. */
   lastSeq: new Map<string, number>(),
@@ -177,6 +202,8 @@ function handleMessage(message: ServerMessage): void {
     case 'welcome':
       state.identity = message.identity;
       state.workspaces = message.workspaces;
+      state.agents = message.agents ?? [];
+      state.defaultAgent = message.defaultAgent ?? '';
       state.sessions = new Map(message.sessions.map((s) => [s.id, s]));
       setConn('online');
       render();
@@ -294,7 +321,7 @@ function homeView(): DocumentFragment {
         el('span', {}, workspace.isGitRepo ? 'git repository' : 'plain directory'),
       ),
     );
-    if (workspace.enabled) card.onclick = () => void startSession(workspace);
+    if (workspace.enabled) card.onclick = () => chooseAgent(workspace);
     scroll.append(card);
   }
 
@@ -318,6 +345,9 @@ function sessionCard(session: SessionSummary): HTMLElement {
       'div',
       { class: 'card-row' },
       el('span', { class: 'card-title' }, session.title),
+      ...(session.pendingPermissions?.length
+        ? [el('span', { class: 'badge needs-approval' }, 'approval needed')]
+        : []),
       el('span', { class: 'badge', 'data-state': session.state }, session.state),
     ),
   );
@@ -326,19 +356,68 @@ function sessionCard(session: SessionSummary): HTMLElement {
       'div',
       { class: 'card-meta' },
       el('span', {}, session.workspaceName),
+      el('span', {}, session.adapterName ?? ''),
       el('span', {}, relativeTime(session.updatedAt)),
-      ...(session.model ? [el('span', {}, session.model)] : []),
     ),
   );
   card.onclick = () => navigate(`/s/${session.id}`);
   return card;
 }
 
-async function startSession(workspace: WorkspaceView): Promise<void> {
+/** Ask which agent should run the session, unless there is only one to pick. */
+function chooseAgent(workspace: WorkspaceView): void {
+  const usable = state.agents.filter((a) => a.available);
+  if (usable.length === 0) {
+    toast('No coding agent is installed on the server.', 'error');
+    return;
+  }
+  if (usable.length === 1) {
+    void startSession(workspace, usable[0]!.id);
+    return;
+  }
+
+  const sheet = el('div', { class: 'sheet' });
+  const panel = el('div', { class: 'sheet-panel' });
+  panel.append(el('div', { class: 'sheet-title' }, `Start in ${workspace.name}`));
+
+  for (const agent of state.agents) {
+    const option = el('button', { class: `card ${agent.available ? '' : 'disabled'}` });
+    const row = el('div', { class: 'card-row' }, el('span', { class: 'card-title' }, agent.displayName));
+    if (!agent.available) row.append(el('span', { class: 'badge' }, 'not installed'));
+    else if (agent.id === state.defaultAgent) row.append(el('span', { class: 'badge' }, 'default'));
+    option.append(row);
+    option.append(
+      el(
+        'div',
+        { class: 'card-meta' },
+        el('span', {}, agent.available ? agent.note : `"${agent.command}" was not found on PATH`),
+      ),
+    );
+    if (agent.available) {
+      option.onclick = () => {
+        sheet.remove();
+        void startSession(workspace, agent.id);
+      };
+    }
+    panel.append(option);
+  }
+
+  const cancel = el('button', { class: 'btn' }, 'Cancel');
+  cancel.onclick = () => sheet.remove();
+  panel.append(cancel);
+
+  sheet.append(panel);
+  sheet.onclick = (event) => {
+    if (event.target === sheet) sheet.remove();
+  };
+  document.body.append(sheet);
+}
+
+async function startSession(workspace: WorkspaceView, adapterId: string): Promise<void> {
   try {
     const result = await api<{ session: SessionSummary }>('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ workspaceId: workspace.id }),
+      body: JSON.stringify({ workspaceId: workspace.id, adapterId }),
     });
     state.sessions.set(result.session.id, result.session);
     state.lastSeq.set(result.session.id, 0);
@@ -363,7 +442,7 @@ function sessionView(): DocumentFragment {
   stopBtn.onclick = () => void stopSession();
 
   fragment.append(
-    topbar(session?.title ?? 'Session', session ? `${session.workspaceName} · ${session.state}` : undefined, {
+    topbar(session?.title ?? 'Session', session ? `${session.workspaceName} · ${session.adapterName} · ${session.state}` : undefined, {
       back: true,
       actions: [stopBtn],
     }),
@@ -486,8 +565,14 @@ function updateSessionChrome(): void {
   const session = state.sessions.get(state.route.sessionId);
   if (!session) return;
 
+  const waiting = session.pendingPermissions?.length ?? 0;
   const subtitle = document.querySelector('.topbar .subtitle');
-  if (subtitle) subtitle.textContent = `${session.workspaceName} · ${session.state}`;
+  if (subtitle) {
+    subtitle.textContent = waiting
+      ? `${session.workspaceName} · waiting for your approval`
+      : `${session.workspaceName} · ${session.adapterName} · ${session.state}`;
+  }
+  document.querySelector('.topbar')?.classList.toggle('awaiting-approval', waiting > 0);
   const heading = document.querySelector('.topbar h1');
   if (heading && heading.firstChild) heading.firstChild.textContent = session.title;
 
@@ -592,17 +677,33 @@ function renderEvent(event: SessionEvent): void {
     }
 
     case 'command_started': {
-      const node = el('details', { class: 'event command', id: `cmd-${text('toolUseId')}` });
-      node.append(
+      const toolUseId = text('toolUseId');
+      // A shell tool arrives as tool_use *and* command_started. Upgrade the
+      // node the tool_use created rather than rendering the command twice.
+      const existing = document.getElementById(`tool-${toolUseId}`);
+      const node = existing ?? el('details', { class: 'event' });
+      node.className = 'event command';
+      node.id = `cmd-${toolUseId}`;
+      node.replaceChildren(
         el(
           'summary',
           {},
           el('span', { class: 'label' }, 'run'),
           el('span', { class: 'headline' }, text('command')),
         ),
+        el('pre', { class: 'body' }, '…'),
       );
-      node.append(el('pre', { class: 'body' }, '…'));
-      stream.append(node);
+      if (!existing) stream.append(node);
+      break;
+    }
+
+    case 'permission_request': {
+      stream.append(permissionCard(event));
+      break;
+    }
+
+    case 'permission_resolved': {
+      resolvePermissionCard(text('requestId'), text('decision') as 'allow' | 'deny', text('decidedBy'));
       break;
     }
 
@@ -658,6 +759,59 @@ function renderEvent(event: SessionEvent): void {
   }
 
   scrollToBottom();
+}
+
+/**
+ * The CLI is blocked until this is answered, so the card is deliberately loud
+ * and shows the exact command that will run.
+ */
+function permissionCard(event: SessionEvent): HTMLElement {
+  const requestId = String(event['requestId'] ?? '');
+  const command = typeof event['command'] === 'string' ? event['command'] : '';
+  const summary = String(event['summary'] ?? '');
+  const toolName = String(event['displayName'] ?? event['toolName'] ?? 'tool');
+
+  const card = el('div', { class: 'permission', id: `perm-${requestId}` });
+  card.append(
+    el(
+      'div',
+      { class: 'permission-head' },
+      el('span', { class: 'permission-icon' }, '!'),
+      el('span', {}, `${toolName} needs your approval`),
+    ),
+  );
+  card.append(el('pre', { class: 'permission-command' }, command || summary));
+
+  const actions = el('div', { class: 'permission-actions' });
+  const deny = el('button', { class: 'btn danger' }, 'Deny');
+  const allow = el('button', { class: 'btn primary' }, 'Approve');
+
+  const decide = (decision: 'allow' | 'deny'): void => {
+    allow.setAttribute('disabled', 'true');
+    deny.setAttribute('disabled', 'true');
+    if (!send({ t: 'permission', sessionId: state.route.sessionId, requestId, decision })) {
+      allow.removeAttribute('disabled');
+      deny.removeAttribute('disabled');
+      return;
+    }
+    actions.replaceChildren(el('span', { class: 'permission-pending' }, 'Sending…'));
+  };
+
+  allow.onclick = () => decide('allow');
+  deny.onclick = () => decide('deny');
+  actions.append(deny, allow);
+  card.append(actions);
+  return card;
+}
+
+function resolvePermissionCard(requestId: string, decision: 'allow' | 'deny', decidedBy: string): void {
+  const card = document.getElementById(`perm-${requestId}`);
+  if (!card) return;
+  card.classList.add(decision === 'allow' ? 'allowed' : 'denied');
+  const actions = card.querySelector('.permission-actions');
+  const who = decidedBy && decidedBy !== 'null' ? ` by ${decidedBy}` : '';
+  const label = decision === 'allow' ? `Approved${who}` : `Denied${who}`;
+  if (actions) actions.replaceChildren(el('span', { class: 'permission-outcome' }, label));
 }
 
 function thinkingBlock(initial = ''): HTMLElement {

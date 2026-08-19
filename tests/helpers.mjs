@@ -10,10 +10,12 @@ import { createLogger } from '../dist/server/logger.js';
 import { WorkspaceRegistry } from '../dist/server/workspaces.js';
 import { SessionStore } from '../dist/server/sessions/store.js';
 import { SessionManager } from '../dist/server/sessions/manager.js';
+import { AdapterRegistry } from '../dist/server/adapters/registry.js';
 import { buildServer } from '../dist/server/http.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE_CLI = path.join(here, 'fake-cli.mjs');
+export const FAKE_GEMINI = path.join(here, 'fake-gemini-cli.mjs');
 
 export async function makeTempDir(prefix = 'terminal-agent-test-') {
   return fsp.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -62,18 +64,25 @@ export async function buildHarness(overrides = {}) {
     WORKSPACES_FILE: workspacesFile,
     STATE_DIR: path.join(root, 'state'),
     LOG_LEVEL: 'silent',
-    CLI_COMMAND: FAKE_CLI,
-    CLI_ADAPTER: 'claude-code',
-    CLI_MODEL: 'fake-model-1',
+    CLAUDE_COMMAND: FAKE_CLI,
+    CLAUDE_MODEL: 'fake-model-1',
+    GEMINI_COMMAND: FAKE_GEMINI,
+    GEMINI_MODEL: 'fake-gemini-1',
     ...overrides,
   });
 
   const log = createLogger({ level: 'fatal', pretty: false });
   const workspaces = await WorkspaceRegistry.load(config.workspacesFile, log);
+  const adapters = AdapterRegistry.create({
+    enabled: config.adapters,
+    defaultAdapter: config.defaultAdapter,
+    commands: config.adapterCommands,
+    models: config.adapterModels,
+  });
   const store = new SessionStore(config.stateDir, log);
-  const sessions = new SessionManager(config, log, workspaces, store);
+  const sessions = new SessionManager(config, log, workspaces, store, adapters);
   await sessions.init();
-  const { app, hub } = await buildServer({ config, log, workspaces, sessions });
+  const { app, hub } = await buildServer({ config, log, workspaces, sessions, adapters });
 
   return {
     root,
@@ -82,6 +91,7 @@ export async function buildHarness(overrides = {}) {
     config,
     log,
     workspaces,
+    adapters,
     store,
     sessions,
     app,

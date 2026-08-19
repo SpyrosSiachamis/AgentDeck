@@ -20,6 +20,9 @@ export type SessionSummary = Readonly<{
   id: string;
   workspaceId: string;
   workspaceName: string;
+  /** Which CLI agent runs this session. */
+  adapterId: string;
+  adapterName: string;
   title: string;
   state: SessionState;
   model: string | null;
@@ -32,6 +35,10 @@ export type SessionSummary = Readonly<{
   /** True when the session can be brought back with resume(). */
   resumable: boolean;
   pendingInstructions: number;
+  /** Tool approvals waiting on a human, oldest first. */
+  pendingPermissions: PendingPermission[];
+  /** Whether this session's agent can ask for approval at all. */
+  supportsPermissionPrompts: boolean;
   createdBy: string | null;
   exit?: { code: number | null; signal: string | null; reason: string } | null;
 }>;
@@ -47,6 +54,20 @@ export class SessionBusyError extends Error {
 export class SessionNotRunningError extends Error {
   readonly code = 'session_not_running';
 }
+export class PermissionNotFoundError extends Error {
+  readonly code = 'permission_not_found';
+}
+export class PermissionUnsupportedError extends Error {
+  readonly code = 'permission_unsupported';
+}
+
+export type PendingPermission = Readonly<{
+  requestId: string;
+  toolName: string;
+  summary: string;
+  command?: string;
+  requestedAt: number;
+}>;
 
 export class Session {
   private adapter: CLIAdapter | null = null;
@@ -63,6 +84,11 @@ export class Session {
   private exit: { code: number | null; signal: string | null; reason: string } | null = null;
   private flushTimer: NodeJS.Timeout | null = null;
   private pendingPersist: SessionEvent[] = [];
+  /** Serialises appends so the log keeps its order, and lets shutdown wait. */
+  private writeChain: Promise<void> = Promise.resolve();
+  /** Tool approvals the CLI is blocked on, newest last. */
+  private readonly pendingPermissions = new Map<string, PendingPermission>();
+  private readonly permissionTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     readonly id: string,
@@ -72,6 +98,7 @@ export class Session {
       log: Logger;
       store: SessionStore;
       factory: CLIAdapterFactory;
+      adapterName: string;
     },
     private meta: {
       title: string;
@@ -100,7 +127,7 @@ export class Session {
     if (this.adapter) throw new Error('session already has a process');
     const adapter = this.deps.factory.create({
       cwd: this.workspace.path,
-      model: this.meta.model ?? this.deps.config.cliModel ?? undefined,
+      model: this.meta.model ?? undefined,
       permissionMode: this.meta.permissionMode ?? this.deps.config.cliPermissionMode,
       resumeCliSessionId: resume ? this.cliSessionId : null,
       limits: {
@@ -178,14 +205,79 @@ export class Session {
     return instructionId;
   }
 
+  /** Answer a pending approval. Returns the request that was resolved. */
+  async respondToPermission(
+    requestId: string,
+    decision: 'allow' | 'deny',
+    decidedBy: string | null,
+    reason?: string,
+  ): Promise<PendingPermission> {
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) throw new PermissionNotFoundError('no pending approval with that id');
+    if (!this.adapter || !this.live) throw new SessionNotRunningError('session process is not running');
+    if (!this.adapter.supportsPermissionPrompts) {
+      throw new PermissionUnsupportedError('this agent does not support tool approval');
+    }
+
+    await this.adapter.respondToPermission(requestId, { decision, reason });
+    this.record({ type: 'permission_resolved', requestId, decision, decidedBy, reason });
+    this.deps.log.info(
+      { sessionId: this.id, requestId, decision, tool: pending.toolName, decidedBy },
+      'tool approval answered',
+    );
+    return pending;
+  }
+
+  /**
+   * An unanswered approval blocks the CLI indefinitely, so deny it after a
+   * timeout rather than leaving the session wedged.
+   */
+  private armPermissionTimeout(requestId: string): void {
+    this.clearPermissionTimer(requestId);
+    const timer = setTimeout(() => {
+      if (!this.pendingPermissions.has(requestId)) return;
+      this.deps.log.warn({ sessionId: this.id, requestId }, 'tool approval timed out; denying');
+      void this.respondToPermission(
+        requestId,
+        'deny',
+        null,
+        'No one answered the approval request in time.',
+      ).catch(() => {
+        // The process may already be gone; drop the request either way.
+        this.pendingPermissions.delete(requestId);
+        this.emitState();
+      });
+    }, this.deps.config.permissionTimeoutMs);
+    timer.unref?.();
+    this.permissionTimers.set(requestId, timer);
+  }
+
+  private clearPermissionTimer(requestId: string): void {
+    const timer = this.permissionTimers.get(requestId);
+    if (timer) clearTimeout(timer);
+    this.permissionTimers.delete(requestId);
+  }
+
+  listPendingPermissions(): PendingPermission[] {
+    return [...this.pendingPermissions.values()];
+  }
+
   async cancel(reason: string): Promise<void> {
     if (!this.adapter) throw new SessionNotRunningError('session process is not running');
     this.setState('cancelling');
     this.pendingInstructions = 0;
+    this.dropPendingPermissions();
     await this.adapter.cancel(reason);
   }
 
+  private dropPendingPermissions(): void {
+    for (const requestId of [...this.pendingPermissions.keys()]) this.clearPermissionTimer(requestId);
+    this.pendingPermissions.clear();
+    this.emitState();
+  }
+
   async terminate(reason: string): Promise<void> {
+    this.dropPendingPermissions();
     if (!this.adapter) {
       this.setState('exited');
       this.persistMeta();
@@ -223,7 +315,8 @@ export class Session {
   async historySince(sinceSeq: number, limit: number): Promise<{ events: SessionEvent[]; skipped: number }> {
     const inMemory = this.eventsSince(sinceSeq);
     if (inMemory.complete) return { events: inMemory.events.slice(-limit), skipped: 0 };
-    this.flushPersist();
+    // Reading from disk must see everything recorded so far.
+    await this.flushPersist();
     return this.deps.store.readEvents(this.id, sinceSeq, limit);
   }
 
@@ -242,6 +335,22 @@ export class Session {
     if (body.type === 'turn_finished' || body.type === 'session_cancelled') {
       this.pendingInstructions = Math.max(0, this.pendingInstructions - 1);
       this.turnStartedAt = null;
+    }
+    if (body.type === 'permission_request') {
+      this.pendingPermissions.set(body.requestId, {
+        requestId: body.requestId,
+        toolName: body.toolName,
+        summary: body.summary,
+        command: body.command,
+        requestedAt: event.ts,
+      });
+      this.armPermissionTimeout(body.requestId);
+      this.emitState();
+    }
+    if (body.type === 'permission_resolved') {
+      this.pendingPermissions.delete(body.requestId);
+      this.clearPermissionTimer(body.requestId);
+      this.emitState();
     }
     if (body.type === 'session_started' && body.cliSessionId) {
       this.cliSessionId = body.cliSessionId;
@@ -269,15 +378,18 @@ export class Session {
     this.flushTimer.unref?.();
   }
 
-  flushPersist(): void {
+  /** Resolves once everything recorded so far is on disk. */
+  flushPersist(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    if (this.pendingPersist.length === 0) return;
-    const batch = this.pendingPersist;
-    this.pendingPersist = [];
-    this.deps.store.appendEvents(this.id, batch);
+    if (this.pendingPersist.length > 0) {
+      const batch = this.pendingPersist;
+      this.pendingPersist = [];
+      this.writeChain = this.writeChain.then(() => this.deps.store.appendEvents(this.id, batch));
+    }
+    return this.writeChain;
   }
 
   // ------------------------------------------------------------------ state
@@ -308,6 +420,18 @@ export class Session {
         this.adapter = null;
         this.persistMeta();
         break;
+    }
+  }
+
+  /** Push the current summary without a state transition. */
+  private emitState(): void {
+    const summary = this.summary();
+    for (const listener of this.stateListeners) {
+      try {
+        listener(summary);
+      } catch {
+        /* a broken subscriber must not break the session */
+      }
     }
   }
 
@@ -346,11 +470,17 @@ export class Session {
     return this.seq;
   }
 
+  get adapterId(): string {
+    return this.deps.factory.id;
+  }
+
   summary(): SessionSummary {
     return Object.freeze({
       id: this.id,
       workspaceId: this.workspace.id,
       workspaceName: this.workspace.name,
+      adapterId: this.deps.factory.id,
+      adapterName: this.deps.adapterName,
       title: this.meta.title,
       state: this.state,
       model: this.model,
@@ -362,6 +492,8 @@ export class Session {
       live: this.live,
       resumable: !this.live && this.cliSessionId !== null,
       pendingInstructions: this.pendingInstructions,
+      pendingPermissions: this.listPendingPermissions(),
+      supportsPermissionPrompts: this.adapter?.supportsPermissionPrompts ?? false,
       createdBy: this.meta.createdBy,
       exit: this.exit,
     });

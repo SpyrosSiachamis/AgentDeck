@@ -12,6 +12,7 @@
  *   FLOOD   - emits a very large amount of output
  *   GARBAGE - emits a line that is not valid JSON
  *   STREAM  - emits partial-message deltas before the final text
+ *   ASK     - requests tool permission and waits for the control_response
  */
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
@@ -25,6 +26,8 @@ const model = modelIndex !== -1 ? args[modelIndex + 1] : 'fake-model-1';
 let seq = 0;
 let interrupted = false;
 let activeTurn = null;
+/** request_id -> resolver, for pending can_use_tool requests. */
+const pendingPermissions = new Map();
 
 function emit(obj) {
   process.stdout.write(JSON.stringify({ ...obj, session_id: sessionId, uuid: `u${++seq}` }) + '\n');
@@ -52,12 +55,54 @@ function assistantText(text) {
 async function runTurn(text) {
   interrupted = false;
 
+  if (text.includes('ASK')) {
+    const requestId = `req-${randomUUID()}`;
+    const decision = await new Promise((resolve) => {
+      pendingPermissions.set(requestId, resolve);
+      emit({
+        type: 'control_request',
+        request_id: requestId,
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'Bash',
+          display_name: 'Bash',
+          input: { command: 'rm -rf ./build', description: 'Clean the build directory' },
+          description: 'Clean the build directory',
+        },
+      });
+    });
+    if (decision.behavior === 'allow') {
+      assistantText('permission granted, running the command');
+    } else {
+      assistantText(`permission denied: ${decision.message ?? ''}`);
+    }
+    finishTurn('success', 'asked and answered');
+    return;
+  }
+
   if (text.includes('GARBAGE')) process.stdout.write('this is not json\n');
 
   if (text.includes('STREAM')) {
-    for (const piece of ['Hel', 'lo ', 'wor', 'ld']) {
-      emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: piece } } });
+    // Faithful to the real CLI: one API message whose blocks are numbered
+    // (thinking = 0, text = 1) while streaming, but delivered afterwards as
+    // separate single-block `assistant` events. Getting this wrong is what
+    // made every reply render twice.
+    const messageId = `msg_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    emit({ type: 'stream_event', event: { type: 'message_start', message: { id: messageId, role: 'assistant', content: [] } } });
+    for (const piece of ['I should ', 'greet them.']) {
+      emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: piece } } });
     }
+    for (const piece of ['Hel', 'lo ', 'wor', 'ld']) {
+      emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: piece } } });
+    }
+    emit({
+      type: 'assistant',
+      message: { id: messageId, role: 'assistant', content: [{ type: 'thinking', thinking: 'I should greet them.' }] },
+    });
+    emit({
+      type: 'assistant',
+      message: { id: messageId, role: 'assistant', content: [{ type: 'text', text: 'Hello world' }] },
+    });
   }
 
   if (text.includes('TOOL')) {
@@ -131,6 +176,16 @@ rl.on('line', (line) => {
   try {
     msg = JSON.parse(line);
   } catch {
+    return;
+  }
+
+  if (msg.type === 'control_response') {
+    const requestId = msg.response?.request_id;
+    const resolve = pendingPermissions.get(requestId);
+    if (resolve) {
+      pendingPermissions.delete(requestId);
+      resolve(msg.response?.response ?? { behavior: 'deny' });
+    }
     return;
   }
 

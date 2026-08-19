@@ -30,13 +30,25 @@ const ALLOW_EXACT = new Set([
 ]);
 
 /**
- * Prefixes that are forwarded so the CLI can pick up its own configuration
- * (model routing, telemetry opt-outs, cloud provider selection).
+ * Prefixes that are forwarded so each CLI can pick up its own configuration
+ * (model routing, telemetry opt-outs, cloud provider selection). GOOGLE_ is
+ * included because the Gemini CLI requires GOOGLE_CLOUD_PROJECT for Workspace
+ * accounts; the credential-bearing names in DENY_EXACT are still withheld.
  */
-const ALLOW_PREFIX = ['CLAUDE_CODE_', 'ANTHROPIC_'];
+const ALLOW_PREFIX = ['CLAUDE_CODE_', 'ANTHROPIC_', 'GEMINI_', 'GOOGLE_', 'GCLOUD_'];
 
 /** Never forwarded, even when a prefix rule would otherwise allow it. */
-const DENY_EXACT = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_ADMIN_KEY']);
+const DENY_EXACT = new Set([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_ADMIN_KEY',
+  // Gemini authenticates through its own OAuth store in $HOME, so key material
+  // is withheld for the same reason as Anthropic's.
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'GOOGLE_CLIENT_SECRET',
+]);
 
 const DENY_PATTERN = /(SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|SESSION_TOKEN)/i;
 

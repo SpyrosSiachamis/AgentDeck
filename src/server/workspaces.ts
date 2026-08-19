@@ -19,6 +19,7 @@ const workspaceSchema = z.object({
   path: z.string().min(1),
   enabled: z.boolean().default(true),
   /** Optional per-workspace overrides for the CLI adapter. */
+  adapterId: z.string().max(64).optional(),
   model: z.string().max(120).optional(),
   permissionMode: z
     .enum(['default', 'acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'])
@@ -37,6 +38,7 @@ export type Workspace = Readonly<{
   /** Fully resolved, symlink-free absolute path. Server-side only. */
   path: string;
   enabled: boolean;
+  adapterId?: string;
   model?: string;
   permissionMode?: string;
   /** Whether the resolved path is a git repository. */

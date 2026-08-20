@@ -45,7 +45,7 @@ const DEFINITIONS: readonly AdapterDefinition[] = [
     displayName: 'Antigravity CLI',
     defaultCommand: 'agy',
     persistentProcess: true,
-    // The CLI has no approval channel of its own; DevTunnel brokers shell
+    // The CLI has no approval channel of its own; AgentDeck brokers shell
     // commands on its behalf, which covers command execution but not file edits.
     supportsPermissionPrompts: true,
     note: 'One long-lived process per session. Asks before running a shell command; its file edits are not gated.',

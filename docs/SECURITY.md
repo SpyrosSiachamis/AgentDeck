@@ -233,7 +233,7 @@ property, not a detail:
 - **Antigravity CLI** has no such channel. Headless it will only auto-deny every
   tool (`request-review`, which makes it unusable) or run unattended with
   `--dangerously-skip-permissions`; `can_use_tool` does not exist in that binary.
-  DevTunnel therefore brokers its **shell commands**: it prepends a private
+  AgentDeck therefore brokers its **shell commands**: it prepends a private
   directory to the child's `PATH` containing its own `zsh`, `bash` and `sh`.
   Each is a small Node program that sends the command line to the server over a
   unix socket in a `0700` directory, blocks until a human answers, and only then

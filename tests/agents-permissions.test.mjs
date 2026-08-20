@@ -22,7 +22,7 @@ test('both agents are offered, and a session runs on the one that was chosen', a
   const agy = agents.find((a) => a.id === 'antigravity-cli');
   assert.equal(claude.supportsPermissionPrompts, true);
   assert.equal(claude.persistentProcess, true);
-  // The Antigravity CLI cannot prompt on its own; DevTunnel brokers its shell
+  // The Antigravity CLI cannot prompt on its own; AgentDeck brokers its shell
   // commands, so sessions on it do ask before running one.
   assert.equal(agy.supportsPermissionPrompts, true);
   assert.equal(agy.persistentProcess, true);

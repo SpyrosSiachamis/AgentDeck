@@ -91,7 +91,7 @@ After running setup:
 
 ## Push Notifications on your Phone
 
-The point of leaving an agent running is that you can put the phone away. DevTunnel
+The point of leaving an agent running is that you can put the phone away. AgentDeck
 uses Web Push so a locked phone still buzzes when:
 
 - the agent **needs an approval** for a command (this one blocks the CLI until you answer), or
@@ -103,7 +103,7 @@ Apple only delivers push to an **installed** PWA, so the order matters:
 
 1. Open the `https://…ts.net` URL in **Safari** (iOS 16.4 or newer).
 2. **Share → Add to Home Screen**.
-3. Launch DevTunnel **from the new Home Screen icon**, not from the Safari tab.
+3. Launch AgentDeck **from the new Home Screen icon**, not from the Safari tab.
 4. Tap the 🔔 button in the header → **Turn on**, and accept the iOS prompt.
 5. Use **Send a test notification** to confirm the round trip.
 
@@ -131,7 +131,7 @@ which of the two behaviours your device has, so you are not left guessing.
 ### What it costs you
 
 Delivery goes through Apple's, Google's or Mozilla's push service, so this is the
-**one part of DevTunnel that leaves your tailnet**. A notification carries the session
+**one part of AgentDeck that leaves your tailnet**. A notification carries the session
 title and a one-line summary of the command awaiting approval. Everything is encrypted
 end to end (RFC 8291) — the push service can see the size and timing, not the content.
 If that is not a trade you want, set `PUSH_ENABLED=false` and the whole subsystem,
@@ -236,12 +236,12 @@ differently, and the difference matters:
 
 | | Claude Code | Antigravity CLI (Gemini) |
 | --- | --- | --- |
-| Shell commands | Asks, over the CLI's own control channel | Asks, via DevTunnel's shell broker |
+| Shell commands | Asks, over the CLI's own control channel | Asks, via AgentDeck's shell broker |
 | File edits | Asks (unless `acceptEdits`) | **Not gated** — see below |
 | Cancels cleanly mid-turn | Yes | Yes |
 
 Claude Code exposes `--permission-prompt-tool`, so it hands each tool request to
-DevTunnel and blocks until you answer.
+AgentDeck and blocks until you answer.
 
 The Antigravity CLI has no such channel. Run it headless and it offers only two
 behaviours: its `request-review` mode auto-**denies** every tool (the turn just
@@ -249,7 +249,7 @@ fails), or `--dangerously-skip-permissions` runs everything unattended. Neither
 is "ask the phone".
 
 What it does do is run every shell command as `<shell> -c "<command>"`, resolving
-the shell through `PATH`. So DevTunnel puts its own `zsh`/`bash`/`sh` at the
+the shell through `PATH`. So AgentDeck puts its own `zsh`/`bash`/`sh` at the
 front of that `PATH`. Each is a tiny program that hands the command line back to
 the server and waits; you get the normal Approve / Deny card and push
 notification, and only then does it exec the real shell. Deny it and the agent

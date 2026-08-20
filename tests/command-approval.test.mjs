@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { CommandApprovalBroker } from '../dist/server/adapters/command-broker.js';
 
 /**
- * The Antigravity CLI cannot ask for approval, so DevTunnel intercepts the
+ * The Antigravity CLI cannot ask for approval, so AgentDeck intercepts the
  * shell it runs commands through. These tests drive that shim directly: if a
  * denial does not actually stop the command, the whole feature is theatre.
  */

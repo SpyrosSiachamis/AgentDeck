@@ -291,9 +291,9 @@ export async function buildServer(deps: AppDeps) {
     if (!push.enabled) throw new PushError('Web push is disabled on this server', 'push_disabled', 409);
     const result = await push.send({
       kind: 'test',
-      title: 'DevTunnel notifications are on',
+      title: 'AgentDeck notifications are on',
       body: 'Approvals and finished turns will reach you here.',
-      tag: 'devtunnel-test',
+      tag: 'agentdeck-test',
       url: '/',
       sessionId: null,
       ts: Date.now(),

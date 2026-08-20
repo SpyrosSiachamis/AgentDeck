@@ -35,7 +35,9 @@ export type PushStatus = {
 
 type PushConfig = { enabled: boolean; publicKey: string | null; devices: number; mine: number };
 
-const STORAGE_KEY = 'devtunnel.push.enabled';
+const STORAGE_KEY = 'agentdeck.push.enabled';
+/** The key this used before the rename; read once so nobody has to re-opt-in. */
+const LEGACY_STORAGE_KEY = 'devtunnel.push.enabled';
 
 let registration: ServiceWorkerRegistration | null = null;
 let registering: Promise<ServiceWorkerRegistration | null> | null = null;
@@ -81,7 +83,18 @@ function maxActions(): number {
 
 function remembered(): boolean {
   try {
-    return window.localStorage?.getItem(STORAGE_KEY) === '1';
+    const storage = window.localStorage;
+    if (!storage) return false;
+    if (storage.getItem(STORAGE_KEY) === '1') return true;
+
+    // A device set up before the rename still holds a live push subscription;
+    // losing this flag would show it as "off" and stop the re-sync on launch.
+    if (storage.getItem(LEGACY_STORAGE_KEY) === '1') {
+      storage.setItem(STORAGE_KEY, '1');
+      storage.removeItem(LEGACY_STORAGE_KEY);
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -91,6 +104,7 @@ function remember(enabled: boolean): void {
   try {
     if (enabled) window.localStorage?.setItem(STORAGE_KEY, '1');
     else window.localStorage?.removeItem(STORAGE_KEY);
+    window.localStorage?.removeItem(LEGACY_STORAGE_KEY);
   } catch {
     /* private browsing; the subscription still works for this session */
   }
@@ -141,7 +155,7 @@ export async function pushStatus(): Promise<PushStatus> {
       return {
         ...base,
         availability: 'needs-install',
-        detail: 'On iPhone and iPad, notifications work only after you add DevTunnel to your Home Screen.',
+        detail: 'On iPhone and iPad, notifications work only after you add AgentDeck to your Home Screen.',
       };
     }
     return {
@@ -154,7 +168,7 @@ export async function pushStatus(): Promise<PushStatus> {
     return {
       ...base,
       availability: 'needs-install',
-      detail: 'On iPhone and iPad, notifications work only after you add DevTunnel to your Home Screen.',
+      detail: 'On iPhone and iPad, notifications work only after you add AgentDeck to your Home Screen.',
     };
   }
 
@@ -204,7 +218,7 @@ export async function enablePush(): Promise<PushStatus> {
   if (granted !== 'granted') {
     throw new Error(
       granted === 'denied'
-        ? 'Notifications were blocked. Re-allow them in your device settings for DevTunnel.'
+        ? 'Notifications were blocked. Re-allow them in your device settings for AgentDeck.'
         : 'Notification permission was dismissed.',
     );
   }

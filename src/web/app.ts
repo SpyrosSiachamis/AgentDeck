@@ -362,7 +362,7 @@ function homeView(): DocumentFragment {
   );
   bell.onclick = () => openNotificationSheet();
   fragment.append(
-    topbar('DevTunnel', state.identity?.viaTailscale ? 'via Tailscale' : 'local access', { actions: [bell] }),
+    topbar('AgentDeck', state.identity?.viaTailscale ? 'via Tailscale' : 'local access', { actions: [bell] }),
   );
 
   const scroll = el('div', { class: 'scroll' });
@@ -652,7 +652,7 @@ function notificationPanel(status: PushStatus, refresh: () => Promise<void>): Do
         el(
           'div',
           { class: 'status-line' },
-          'Tip: add DevTunnel to your Home Screen so notifications keep arriving with the browser closed.',
+          'Tip: add AgentDeck to your Home Screen so notifications keep arriving with the browser closed.',
         ),
       );
     }
@@ -663,7 +663,7 @@ function notificationPanel(status: PushStatus, refresh: () => Promise<void>): Do
 
 function installInstructions(): HTMLElement {
   const box = el('div', { class: 'push-install' });
-  box.append(el('div', { class: 'push-row-title' }, 'Add DevTunnel to your Home Screen first'));
+  box.append(el('div', { class: 'push-row-title' }, 'Add AgentDeck to your Home Screen first'));
   box.append(
     el(
       'div',
@@ -675,7 +675,7 @@ function installInstructions(): HTMLElement {
   for (const step of [
     'Tap the Share button in Safari\u2019s toolbar.',
     'Choose \u201CAdd to Home Screen\u201D.',
-    'Open DevTunnel from the new icon, then come back here and turn notifications on.',
+    'Open AgentDeck from the new icon, then come back here and turn notifications on.',
   ]) {
     steps.append(el('li', {}, step));
   }

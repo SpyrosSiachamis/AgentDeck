@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "DevTunnel",
-  "short_name": "DevTunnel",
+  "name": "AgentDeck",
+  "short_name": "AgentDeck",
   "description": "Remote console for an AI coding agent, over your tailnet.",
   "start_url": "/",
   "scope": "/",

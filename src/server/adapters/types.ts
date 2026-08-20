@@ -127,6 +127,8 @@ export type AdapterDescriptor = Readonly<{
   persistentProcess: boolean;
   /** Whether sessions on this agent can prompt for tool approval. */
   supportsPermissionPrompts: boolean;
+  /** Whether the settings page can offer a model picker for this agent. */
+  listsModels: boolean;
   /** Human-readable note shown in the picker. */
   note: string;
 }>;

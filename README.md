@@ -89,6 +89,36 @@ After running setup:
 
 ---
 
+## Settings
+
+The gear on the home screen opens a settings page:
+
+- **Appearance** — Light, Dark, or Device (follow the phone's own setting).
+  Stored per device, since a phone at night and a laptop in daylight are
+  allowed to disagree.
+- **Notifications** — turn push on or off for this device, choose whether a
+  finished turn is worth a notification, and send a test. Approval requests are
+  deliberately not switchable: they block the agent, and silencing them would
+  strand a session with no sign of why.
+- **Default models** — the model each agent starts a new session with. Agents
+  that can list their models (`agy models`) get a picker; the rest take a typed
+  id. Leave a field empty to fall back to the environment default.
+
+Everything except the theme is stored on the server in `${STATE_DIR}/settings.json`
+and shared across your devices — a change on the phone shows up on the laptop.
+Delete that file and the deployment returns to exactly its configured behaviour.
+
+Model precedence, most specific first:
+
+1. a model named when the session is created
+2. `models` for that agent in `workspaces.json`
+3. the default chosen here
+4. `CLAUDE_MODEL` / `AGY_MODEL` in the environment
+5. whatever the agent picks for itself
+
+Changing a default affects **new** sessions; a running session keeps the model
+it started with.
+
 ## Push Notifications on your Phone
 
 The point of leaving an agent running is that you can put the phone away. AgentDeck
@@ -313,13 +343,14 @@ Every setting is documented in [.env.example](.env.example). Key settings:
 | `CLI_DEFAULT_ADAPTER` | `claude-code` | Agent used when none is explicitly specified |
 | `CLAUDE_COMMAND` | `claude` | Custom binary name or path for Claude Code |
 | `AGY_COMMAND` | `agy` | Custom binary name or path for Antigravity CLI |
+| `CLAUDE_MODEL` / `AGY_MODEL` | *(agent default)* | Fallback model per agent. The settings page overrides these |
 | `CLI_PERMISSION_MODE` | `default` | `default`, `acceptEdits`, or `full`. `full` disables approvals entirely |
 | `PERMISSION_TIMEOUT_MS` | `900000` (15m) | Auto-denies an unanswered approval |
 | `MAX_CONCURRENT_SESSIONS` | `4` | Maximum concurrent active CLI processes |
 | `TURN_TIMEOUT_MS` | `1800000` (30m) | Timeout before auto-cancelling a runaway task |
 | `SESSION_IDLE_TIMEOUT_MS` | `21600000` (6h) | Reaps forgotten inactive sessions |
 | `PUSH_ENABLED` | `true` | Web Push for the installed PWA. `false` disables it entirely |
-| `PUSH_NOTIFY_TURN_FINISHED` | `true` | Notify when a turn ends, not only on approvals |
+| `PUSH_NOTIFY_TURN_FINISHED` | `true` | Notify when a turn ends, not only on approvals. Overridable from the settings page |
 | `PUSH_SUPPRESS_WHEN_VISIBLE` | `true` | Skip a "done" push while the session is on screen |
 | `VAPID_SUBJECT` | `mailto:terminal-agent@localhost` | Contact claim sent to the push service |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | *(generated)* | Supply your own keys instead of the generated pair |

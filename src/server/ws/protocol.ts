@@ -3,6 +3,7 @@ import type { SessionEvent } from '../sessions/events.js';
 import type { SessionSummary } from '../sessions/session.js';
 import type { PublicWorkspace } from '../workspaces.js';
 import type { AdapterDescriptor } from '../adapters/types.js';
+import type { AppSettings } from '../settings.js';
 
 /** Every inbound frame is validated before it can touch session state. */
 export const clientMessageSchema = z.discriminatedUnion('t', [
@@ -50,9 +51,11 @@ export type ServerMessage =
       defaultAgent: string;
       sessions: SessionSummary[];
       limits: { maxConcurrentSessions: number; maxInstructionChars: number };
+      settings: AppSettings;
       serverTime: number;
     }
   | { t: 'pong'; serverTime: number }
+  | { t: 'settings'; settings: AppSettings }
   | { t: 'events'; sessionId: string; events: SessionEvent[] }
   | { t: 'session'; session: SessionSummary }
   | { t: 'sessions'; sessions: SessionSummary[] }

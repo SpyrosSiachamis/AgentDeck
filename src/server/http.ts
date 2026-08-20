@@ -20,6 +20,7 @@ import { GitService } from './git.js';
 import { WebSocketHub } from './ws/hub.js';
 import { PushError, PushService } from './push.js';
 import { SessionNotifier } from './notify.js';
+import { SettingsError, SettingsStore, settingsPatchSchema } from './settings.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(here, '../web');
@@ -54,15 +55,21 @@ export type AppDeps = {
   workspaces: WorkspaceRegistry;
   sessions: SessionManager;
   adapters: AdapterRegistry;
+  /** Shared with the session manager when the caller wired one up. */
+  settings?: SettingsStore;
 };
 
 export async function buildServer(deps: AppDeps) {
   const { config, log, workspaces, sessions, adapters } = deps;
   const git = new GitService(config, workspaces);
   const push = await PushService.create(config, log);
-  const notifier = new SessionNotifier(config, log, push);
+  // Reuse the manager's store when one was supplied, so a single instance backs
+  // both model resolution and the API.
+  const settings = deps.settings ?? new SettingsStore(config, log);
+  if (!deps.settings) await settings.init();
+  const notifier = new SessionNotifier(config, log, push, settings);
   notifier.attach(sessions);
-  const hub = new WebSocketHub({ config, log, sessions, workspaces, adapters });
+  const hub = new WebSocketHub({ config, log, sessions, workspaces, adapters, settings });
   // The hub knows which sessions are on screen; the notifier uses that to stay quiet.
   notifier.setVisibilityProbe((sessionId) => hub.hasVisibleWatcher(sessionId));
 
@@ -263,6 +270,34 @@ export async function buildServer(deps: AppDeps) {
     return { ok: true, deleted: id };
   });
 
+  // --------------------------------------------------------- settings routes
+
+  app.get('/api/settings', async () => ({
+    settings: settings.get(),
+    /** What each field falls back to, so the UI can label the empty state. */
+    defaults: {
+      models: Object.fromEntries(adapters.list().map((a) => [a.id, a.model])),
+      notifications: { turnFinished: config.push.notifyTurnFinished },
+    },
+  }));
+
+  app.put('/api/settings', async (req) => {
+    const patch = settingsPatchSchema.parse(req.body);
+    for (const adapterId of Object.keys(patch.models ?? {})) {
+      if (!adapters.has(adapterId)) {
+        throw new SettingsError(`Unknown agent: ${adapterId.slice(0, 40)}`);
+      }
+    }
+    const updated = await settings.update(patch);
+    hub.broadcastSettings(updated);
+    return { settings: updated };
+  });
+
+  app.get('/api/agents/:id/models', async (req) => {
+    const { id } = req.params as { id: string };
+    return { agentId: id, models: await adapters.listModels(id) };
+  });
+
   // ------------------------------------------------------------- push routes
   // The PWA needs the VAPID public key before it can subscribe; it is public by
   // design (the private half never leaves the server).
@@ -347,6 +382,7 @@ function errorCode(err: unknown): string {
   if (err instanceof AdapterError) return err.code;
   if (err instanceof AuthorizationError) return 'forbidden';
   if (err instanceof PushError) return err.code;
+  if (err instanceof SettingsError) return err.code;
   if (err instanceof SessionBusyError || err instanceof SessionNotRunningError) return err.code;
   if (err instanceof PermissionNotFoundError || err instanceof PermissionUnsupportedError) return err.code;
   if (err instanceof z.ZodError) return 'invalid_request';
@@ -357,6 +393,7 @@ function errorCode(err: unknown): string {
 function mapErrorStatus(err: unknown): number {
   if (err instanceof AuthorizationError) return err.status;
   if (err instanceof PushError) return err.status;
+  if (err instanceof SettingsError) return 400;
   if (err instanceof z.ZodError) return 400;
   if (err instanceof WorkspaceError) return err.code === 'unknown_workspace' ? 404 : 403;
   if (err instanceof AdapterError) return err.code === 'unknown_adapter' ? 404 : 409;

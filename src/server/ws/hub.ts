@@ -8,6 +8,7 @@ import { WorkspaceError, type WorkspaceRegistry } from '../workspaces.js';
 import { AdapterError, type AdapterRegistry } from '../adapters/registry.js';
 import type { SessionEvent } from '../sessions/events.js';
 import { clientMessageSchema, type ServerMessage } from './protocol.js';
+import type { AppSettings, SettingsStore } from '../settings.js';
 
 const MAX_INVALID_MESSAGES = 10;
 const MAX_SUBSCRIPTIONS_PER_SOCKET = 8;
@@ -36,6 +37,7 @@ class Connection {
       sessions: SessionManager;
       workspaces: WorkspaceRegistry;
       adapters: AdapterRegistry;
+      settings: SettingsStore;
     },
   ) {}
 
@@ -237,6 +239,7 @@ export class WebSocketHub {
       sessions: SessionManager;
       workspaces: WorkspaceRegistry;
       adapters: AdapterRegistry;
+      settings: SettingsStore;
     },
   ) {
     // Session-level state changes are broadcast to everyone, so the session list
@@ -273,6 +276,7 @@ export class WebSocketHub {
         maxConcurrentSessions: this.deps.config.maxConcurrentSessions,
         maxInstructionChars: this.deps.config.maxInstructionChars,
       },
+      settings: this.deps.settings.get(),
       serverTime: Date.now(),
     });
 
@@ -309,6 +313,11 @@ export class WebSocketHub {
       if (connection.isWatching(sessionId)) return true;
     }
     return false;
+  }
+
+  /** Settings are shared, so a change on one device reaches the others. */
+  broadcastSettings(settings: AppSettings): void {
+    for (const connection of this.connections) connection.send({ t: 'settings', settings });
   }
 
   broadcastSessions(): void {

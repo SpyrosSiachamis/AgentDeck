@@ -92,10 +92,11 @@ const welcome = {
       id: 'claude-code',
       displayName: 'Claude Code',
       command: 'claude',
-      model: null,
+      model: 'fake-model-1',
       available: true,
       persistentProcess: true,
       supportsPermissionPrompts: true,
+      listsModels: false,
       note: 'One long-lived process per session.',
     },
     {
@@ -768,44 +769,92 @@ test('markdown rendering sanitizes malicious scripts and XSS payloads', (t) => {
 });
 
 
-// --------------------------------------------------------- notification setup
+// ------------------------------------------------------------- settings page
 
-/** Waits for the sheet's async status check to render into the panel. */
-async function openNotifications(document) {
-  document.getElementById('notifications-btn').click();
-  const sheet = document.querySelector('.sheet');
-  assert.ok(sheet, 'the bell opens the notifications sheet');
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  return sheet;
+/** Opens the settings page and waits for its async notification check. */
+async function openSettings(document) {
+  document.getElementById('settings-btn').click();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const scroll = document.querySelector('.scroll');
+  assert.ok(scroll, 'the gear opens the settings page');
+  return scroll;
 }
 
-test('the home screen offers notification settings', async (t) => {
-  const { window, document, socket } = mountClient(t);
+test('the settings page covers appearance, notifications and models', async (t) => {
+  const { document, socket } = mountClient(t);
   socket().receive(welcome);
 
-  const sheet = await openNotifications(document);
-  assert.match(sheet.textContent, /approval/i, 'the sheet says what a notification is for');
+  const page = await openSettings(document);
+  assert.match(page.textContent, /Appearance/);
+  assert.match(page.textContent, /Notifications/);
+  assert.match(page.textContent, /Default models/);
 
-  // Nothing here may leave a phone stuck with a dead toggle.
-  assert.equal(sheet.querySelector('.push-body').textContent.trim().length > 0, true);
-  window.document.querySelector('.sheet').remove();
+  // A theme choice for every mode, including handing it back to the device.
+  const choices = [...page.querySelectorAll('[data-theme-choice]')].map((b) => b.getAttribute('data-theme-choice'));
+  assert.deepEqual(choices, ['auto', 'light', 'dark']);
+
+  // One model field per configured agent, prefilled with the effective default.
+  const claude = document.getElementById('model-claude-code');
+  assert.ok(claude, 'each agent gets a model field');
+  assert.equal(claude.getAttribute('placeholder'), 'fake-model-1');
+
+  // The notifications panel must have actually resolved, not be stuck on its
+  // placeholder — the bug that "length > 0" happily accepted.
+  const card = document.getElementById('notifications-card');
+  assert.doesNotMatch(card.textContent, /Checking/, 'the notifications panel resolved');
+  assert.match(card.textContent, /approval/i, 'it says what a notification is for');
 });
 
-test('on an iPhone in Safari the sheet asks for a Home Screen install first', async (t) => {
+test('choosing a theme applies it and remembers it', async (t) => {
+  const { window, document, socket } = mountClient(t);
+  socket().receive(welcome);
+  const page = await openSettings(document);
+
+  const light = page.querySelector('[data-theme-choice="light"]');
+  light.click();
+  assert.equal(document.documentElement.getAttribute('data-theme'), 'light');
+  assert.equal(light.getAttribute('aria-pressed'), 'true');
+  assert.equal(window.localStorage.getItem('agentdeck.theme'), 'light');
+  // The status bar tint has to follow, or an installed PWA keeps a dark notch.
+  assert.equal(document.querySelector('meta[name="theme-color"]').getAttribute('content'), '#f6f7f9');
+
+  // "Device" means "no choice recorded", so the stylesheet's media query decides.
+  page.querySelector('[data-theme-choice="auto"]').click();
+  assert.equal(document.documentElement.hasAttribute('data-theme'), false);
+  assert.equal(window.localStorage.getItem('agentdeck.theme'), null);
+});
+
+test('saving a default model sends it to the server', async (t) => {
+  const { document, socket, fetchCalls } = mountClient(t);
+  socket().receive(welcome);
+  const page = await openSettings(document);
+
+  const input = document.getElementById('model-claude-code');
+  input.value = 'claude-opus-5';
+  [...page.querySelectorAll('.model-input-row .btn')][0].click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const put = fetchCalls.find((c) => String(c.url) === '/api/settings' && c.init?.method === 'PUT');
+  assert.ok(put, 'the model was saved');
+  assert.deepEqual(JSON.parse(put.init.body), { models: { 'claude-code': 'claude-opus-5' } });
+});
+
+test('on an iPhone in Safari the settings page asks for a Home Screen install first', async (t) => {
   const { window, document, socket } = mountClient(t);
   socket().receive(welcome);
 
-  // iOS grants push only to an installed PWA, so the sheet must say so rather
-  // than showing a toggle that silently fails.
+  // iOS grants push only to an installed PWA, so this must say so rather than
+  // showing a toggle that silently fails.
   Object.defineProperty(window.navigator, 'userAgent', {
     value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1',
     configurable: true,
   });
 
-  const sheet = await openNotifications(document);
-  assert.ok(sheet.querySelector('.push-install'), 'the install instructions are shown');
-  assert.match(sheet.textContent, /Add to Home Screen/i);
-  assert.equal(sheet.querySelector('.push-row'), null, 'no toggle is offered until it can work');
+  await openSettings(document);
+  const card = document.getElementById('notifications-card');
+  assert.ok(card.querySelector('.push-install'), 'the install instructions are shown');
+  assert.match(card.textContent, /Add to Home Screen/i);
+  assert.equal(card.querySelector('.push-row'), null, 'no toggle is offered until it can work');
 });
 
 test('watching a session tells the server, so a finished turn does not double-notify', async (t) => {

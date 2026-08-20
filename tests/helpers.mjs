@@ -12,6 +12,7 @@ import { SessionStore } from '../dist/server/sessions/store.js';
 import { SessionManager } from '../dist/server/sessions/manager.js';
 import { AdapterRegistry } from '../dist/server/adapters/registry.js';
 import { buildServer } from '../dist/server/http.js';
+import { SettingsStore } from '../dist/server/settings.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE_CLI = path.join(here, 'fake-cli.mjs');
@@ -79,9 +80,11 @@ export async function buildHarness(overrides = {}) {
     models: config.adapterModels,
   });
   const store = new SessionStore(config.stateDir, log);
-  const sessions = new SessionManager(config, log, workspaces, store, adapters);
+  const settings = new SettingsStore(config, log);
+  await settings.init();
+  const sessions = new SessionManager(config, log, workspaces, store, adapters, settings);
   await sessions.init();
-  const { app, hub } = await buildServer({ config, log, workspaces, sessions, adapters });
+  const { app, hub } = await buildServer({ config, log, workspaces, sessions, adapters, settings });
 
   return {
     root,
@@ -92,6 +95,7 @@ export async function buildHarness(overrides = {}) {
     workspaces,
     adapters,
     store,
+    settings,
     sessions,
     app,
     hub,

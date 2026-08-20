@@ -1,4 +1,5 @@
 import { renderMarkdownInto } from './markdown.js';
+import { currentTheme, initTheme, setTheme, type Theme } from './theme.js';
 import {
   disablePush,
   dismissNotification,
@@ -21,6 +22,8 @@ type AgentView = {
   available: boolean;
   persistentProcess: boolean;
   supportsPermissionPrompts: boolean;
+  /** Whether this agent can be asked for a list of models to pick from. */
+  listsModels?: boolean;
   note: string;
 };
 
@@ -55,8 +58,9 @@ type SessionSummary = {
 type SessionEvent = { seq: number; ts: number; sessionId: string; type: string } & Record<string, unknown>;
 
 type ServerMessage =
-  | { t: 'welcome'; identity: { login: string | null; displayName: string | null; viaTailscale: boolean }; workspaces: WorkspaceView[]; agents: AgentView[]; defaultAgent: string; sessions: SessionSummary[]; limits: { maxConcurrentSessions: number; maxInstructionChars: number } }
+  | { t: 'welcome'; identity: { login: string | null; displayName: string | null; viaTailscale: boolean }; workspaces: WorkspaceView[]; agents: AgentView[]; defaultAgent: string; sessions: SessionSummary[]; limits: { maxConcurrentSessions: number; maxInstructionChars: number }; settings?: AppSettings }
   | { t: 'pong' }
+  | { t: 'settings'; settings: AppSettings }
   | { t: 'events'; sessionId: string; events: SessionEvent[] }
   | { t: 'session'; session: SessionSummary }
   | { t: 'sessions'; sessions: SessionSummary[] }
@@ -75,8 +79,15 @@ const state = {
   sessions: new Map<string, SessionSummary>(),
   /** Highest event sequence rendered per session, for gap-free reconnect. */
   lastSeq: new Map<string, number>(),
-  route: { name: 'home' as 'home' | 'session', sessionId: '' },
+  route: { name: 'home' as 'home' | 'session' | 'settings', sessionId: '' },
   tab: 'chat' as 'chat' | 'git',
+  /** Server-side preferences, mirrored from the welcome frame. */
+  settings: { models: {}, notifications: {} } as AppSettings,
+};
+
+type AppSettings = {
+  models: Record<string, string>;
+  notifications: { turnFinished?: boolean };
 };
 
 const app = document.getElementById('app') as HTMLElement;
@@ -261,6 +272,7 @@ function handleMessage(message: ServerMessage): void {
       state.workspaces = message.workspaces;
       state.agents = message.agents ?? [];
       state.defaultAgent = message.defaultAgent ?? '';
+      if (message.settings) state.settings = message.settings;
       state.sessions = new Map(message.sessions.map((s) => [s.id, s]));
       setConn('online');
       render();
@@ -293,6 +305,12 @@ function handleMessage(message: ServerMessage): void {
       for (const event of message.events) renderEvent(event);
       return;
 
+    case 'settings':
+      // Another device changed a shared preference.
+      state.settings = message.settings;
+      if (state.route.name === 'settings') render();
+      return;
+
     case 'ack':
       return;
 
@@ -308,6 +326,7 @@ function parseRoute(): void {
   const hash = location.hash.replace(/^#/, '');
   const match = /^\/s\/([A-Za-z0-9_-]+)$/.exec(hash);
   if (match?.[1]) state.route = { name: 'session', sessionId: match[1] };
+  else if (hash === '/settings') state.route = { name: 'settings', sessionId: '' };
   else state.route = { name: 'home', sessionId: '' };
 }
 
@@ -326,7 +345,9 @@ window.addEventListener('hashchange', () => {
 // --------------------------------------------------------------------- views
 
 function render(): void {
-  app.replaceChildren(state.route.name === 'home' ? homeView() : sessionView());
+  const view =
+    state.route.name === 'home' ? homeView() : state.route.name === 'settings' ? settingsView() : sessionView();
+  app.replaceChildren(view);
 }
 
 function topbar(title: string, subtitle?: string, opts: { back?: boolean; actions?: HTMLElement[] } = {}): HTMLElement {
@@ -355,14 +376,14 @@ function topbar(title: string, subtitle?: string, opts: { back?: boolean; action
 
 function homeView(): DocumentFragment {
   const fragment = document.createDocumentFragment();
-  const bell = el(
+  const gear = el(
     'button',
-    { class: 'icon-btn', id: 'notifications-btn', 'aria-label': 'Notifications', title: 'Notifications' },
-    '\u{1F514}',
+    { class: 'icon-btn', id: 'settings-btn', 'aria-label': 'Settings', title: 'Settings' },
+    '\u2699\uFE0F',
   );
-  bell.onclick = () => openNotificationSheet();
+  gear.onclick = () => navigate('/settings');
   fragment.append(
-    topbar('AgentDeck', state.identity?.viaTailscale ? 'via Tailscale' : 'local access', { actions: [bell] }),
+    topbar('AgentDeck', state.identity?.viaTailscale ? 'via Tailscale' : 'local access', { actions: [gear] }),
   );
 
   const scroll = el('div', { class: 'scroll' });
@@ -521,41 +542,203 @@ async function startSession(workspace: WorkspaceView, adapterId: string): Promis
   }
 }
 
-// ------------------------------------------------------- notification sheet
+// ------------------------------------------------------------ settings page
+
+function settingsView(): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  fragment.append(topbar('Settings', undefined, { back: true }));
+
+  const scroll = el('div', { class: 'scroll' });
+
+  scroll.append(el('div', { class: 'section-title' }, 'Appearance'));
+  scroll.append(themeCard());
+
+  scroll.append(el('div', { class: 'section-title' }, 'Notifications'));
+  const notifications = el('div', { class: 'settings-card', id: 'notifications-card' });
+  notifications.append(el('div', { class: 'status-line' }, 'Checking…'));
+  scroll.append(notifications);
+  // The element is passed in rather than looked up: this fragment is not in the
+  // document yet, so getElementById would find nothing and leave it "Checking…".
+  void refreshNotificationCard(notifications);
+
+  scroll.append(el('div', { class: 'section-title' }, 'Default models'));
+  scroll.append(modelsCard());
+
+  fragment.append(scroll);
+  return fragment;
+}
+
+function themeCard(): HTMLElement {
+  const card = el('div', { class: 'settings-card' });
+  const group = el('div', { class: 'segmented', role: 'group', 'aria-label': 'Theme' });
+
+  const options: { value: Theme; label: string }[] = [
+    { value: 'auto', label: 'Device' },
+    { value: 'light', label: 'Light' },
+    { value: 'dark', label: 'Dark' },
+  ];
+
+  const buttons = options.map(({ value, label }) => {
+    const button = el(
+      'button',
+      { type: 'button', 'aria-pressed': String(currentTheme() === value), 'data-theme-choice': value },
+      label,
+    );
+    button.onclick = () => {
+      setTheme(value);
+      for (const other of buttons) {
+        other.setAttribute('aria-pressed', String(other.getAttribute('data-theme-choice') === value));
+      }
+    };
+    return button;
+  });
+  for (const button of buttons) group.append(button);
+
+  card.append(group);
+  card.append(
+    el(
+      'div',
+      { class: 'settings-hint' },
+      'Device follows your phone\u2019s light or dark setting. This choice is stored on this device only.',
+    ),
+  );
+  return card;
+}
 
 /**
- * Everything about notifications lives behind one sheet, because on iOS the
- * answer to "why didn't my phone buzz?" is almost always a setup step the user
- * has not done yet. The sheet states which step that is.
+ * Model defaults are a server-side preference: they decide what a new session
+ * launches with. A workspace that pins its own model still wins.
  */
-function openNotificationSheet(): void {
+function modelsCard(): HTMLElement {
+  const card = el('div', { class: 'settings-card' });
+  if (state.agents.length === 0) {
+    card.append(el('div', { class: 'settings-hint' }, 'No agents are configured.'));
+    return card;
+  }
+
+  for (const agent of state.agents) {
+    const field = el('div', { class: 'model-field' });
+    const inputId = `model-${agent.id}`;
+    field.append(el('label', { for: inputId }, agent.displayName));
+
+    const row = el('div', { class: 'model-input-row' });
+    const input = el('input', {
+      id: inputId,
+      type: 'text',
+      autocapitalize: 'off',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      placeholder: agent.model || 'the agent\u2019s own default',
+      value: state.settings.models[agent.id] ?? '',
+    }) as HTMLInputElement;
+    row.append(input);
+
+    const save = el('button', { class: 'btn primary' }, 'Save');
+    save.onclick = () => void saveModel(agent.id, input.value, field);
+    row.append(save);
+    field.append(row);
+
+    if (agent.listsModels) {
+      const browse = el('button', { class: 'btn' }, 'Browse models');
+      browse.onclick = () => void browseModels(agent, input, browse);
+      field.append(el('div', { class: 'btn-row' }, browse));
+    }
+
+    field.append(
+      el(
+        'div',
+        { class: 'settings-hint' },
+        state.settings.models[agent.id]
+          ? `Leave empty to fall back to ${agent.model || 'the agent\u2019s own default'}.`
+          : `Currently using ${agent.model || 'the agent\u2019s own default'}.`,
+      ),
+    );
+    card.append(field);
+  }
+  return card;
+}
+
+async function saveModel(agentId: string, value: string, field: HTMLElement): Promise<void> {
+  try {
+    const result = await api<{ settings: AppSettings }>('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ models: { [agentId]: value.trim() } }),
+    });
+    state.settings = result.settings;
+    const note = el('div', { class: 'settings-saved' }, value.trim() ? 'Saved' : 'Cleared \u2014 using the default');
+    field.append(note);
+    setTimeout(() => note.remove(), 2500);
+    // Existing sessions keep the model they started with.
+    toast('Applies to new sessions');
+  } catch (err) {
+    toast((err as Error).message, 'error');
+  }
+}
+
+async function browseModels(agent: AgentView, input: HTMLInputElement, button: HTMLElement): Promise<void> {
+  button.setAttribute('disabled', 'true');
+  button.textContent = 'Loading\u2026';
+  try {
+    const result = await api<{ models: { id: string; label: string }[] }>(`/api/agents/${agent.id}/models`);
+    pickFromSheet(agent.displayName, result.models, (id) => {
+      input.value = id;
+    });
+  } catch (err) {
+    toast((err as Error).message, 'error');
+  }
+  button.removeAttribute('disabled');
+  button.textContent = 'Browse models';
+}
+
+function pickFromSheet(
+  title: string,
+  models: { id: string; label: string }[],
+  onPick: (id: string) => void,
+): void {
   const sheet = el('div', { class: 'sheet' });
   const panel = el('div', { class: 'sheet-panel' });
-  panel.append(el('div', { class: 'sheet-title' }, 'Notifications'));
+  panel.append(el('div', { class: 'sheet-title' }, title));
 
-  const bodyEl = el('div', { class: 'push-body' }, el('div', { class: 'status-line' }, 'Checking…'));
-  panel.append(bodyEl);
+  if (models.length === 0) {
+    panel.append(el('div', { class: 'empty' }, 'That agent returned no models.'));
+  }
+  for (const model of models) {
+    const option = el('button', { class: 'card' });
+    option.append(el('div', { class: 'card-row' }, el('span', { class: 'card-title' }, model.label)));
+    option.append(el('div', { class: 'card-meta' }, el('span', {}, model.id)));
+    option.onclick = () => {
+      onPick(model.id);
+      sheet.remove();
+    };
+    panel.append(option);
+  }
 
-  const close = el('button', { class: 'btn' }, 'Close');
-  close.onclick = () => sheet.remove();
-  panel.append(close);
+  const cancel = el('button', { class: 'btn' }, 'Cancel');
+  cancel.onclick = () => sheet.remove();
+  panel.append(cancel);
 
   sheet.append(panel);
   sheet.onclick = (event) => {
     if (event.target === sheet) sheet.remove();
   };
   document.body.append(sheet);
-
-  const refresh = async (): Promise<void> => {
-    try {
-      bodyEl.replaceChildren(notificationPanel(await pushStatus(), refresh));
-    } catch (err) {
-      bodyEl.replaceChildren(el('div', { class: 'bubble error' }, (err as Error).message));
-    }
-  };
-  void refresh();
 }
 
+async function refreshNotificationCard(card: HTMLElement): Promise<void> {
+  try {
+    card.replaceChildren(notificationPanel(await pushStatus(), () => refreshNotificationCard(card)));
+  } catch (err) {
+    card.replaceChildren(el('div', { class: 'bubble error' }, (err as Error).message));
+  }
+}
+
+// ------------------------------------------------------- notification panel
+
+/**
+ * The notifications section of the settings page. On iOS the answer to "why
+ * didn't my phone buzz?" is almost always a setup step the user has not done
+ * yet, so this states which step that is rather than showing a dead toggle.
+ */
 function notificationPanel(status: PushStatus, refresh: () => Promise<void>): DocumentFragment {
   const fragment = document.createDocumentFragment();
 
@@ -634,6 +817,8 @@ function notificationPanel(status: PushStatus, refresh: () => Promise<void>): Do
       ),
     );
 
+    fragment.append(turnFinishedToggle());
+
     const test = el('button', { class: 'btn' }, 'Send a test notification');
     test.onclick = async () => {
       test.setAttribute('disabled', 'true');
@@ -659,6 +844,47 @@ function notificationPanel(status: PushStatus, refresh: () => Promise<void>): Do
   }
 
   return fragment;
+}
+
+/**
+ * Approvals are deliberately not switchable: they block the CLI, so silencing
+ * them would strand a session with no sign of why.
+ */
+function turnFinishedToggle(): HTMLElement {
+  const row = el('div', { class: 'toggle-row' });
+  const enabled = state.settings.notifications.turnFinished ?? true;
+
+  row.append(
+    el(
+      'div',
+      { class: 'push-row-text' },
+      el('span', { class: 'push-row-title' }, 'When a turn finishes'),
+      el('span', { class: 'push-row-sub' }, 'Approval requests always notify, because they block the agent.'),
+    ),
+  );
+
+  const toggle = el('input', {
+    type: 'checkbox',
+    class: 'switch',
+    'aria-label': 'Notify when a turn finishes',
+  }) as HTMLInputElement;
+  toggle.checked = enabled;
+  toggle.onchange = async () => {
+    toggle.disabled = true;
+    try {
+      const result = await api<{ settings: AppSettings }>('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ notifications: { turnFinished: toggle.checked } }),
+      });
+      state.settings = result.settings;
+    } catch (err) {
+      toast((err as Error).message, 'error');
+      toggle.checked = !toggle.checked;
+    }
+    toggle.disabled = false;
+  };
+  row.append(toggle);
+  return row;
 }
 
 function installInstructions(): HTMLElement {
@@ -1382,6 +1608,9 @@ function fallbackCopy(text: string, onSuccess: () => void): void {
 }
 
 // ------------------------------------------------------------------ bootstrap
+
+// Before the first render, so there is no flash of the wrong palette.
+initTheme();
 
 parseRoute();
 render();

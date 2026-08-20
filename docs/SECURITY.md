@@ -204,6 +204,20 @@ payload, so the push service cannot see or forge them; and because a device only
 receives pushes after subscribing through an authorized request, holding the
 notification already implies holding the session.
 
+## Settings written from the browser
+
+`STATE_DIR/settings.json` (mode `0600`) holds the preferences the settings page
+writes. It is deliberately narrow: default model per agent, and whether a
+finished turn raises a notification. The route rejects unknown fields outright,
+rejects unknown agent ids, and constrains a model id to
+`[A-Za-z0-9._:@/-]{1,120}` — it is passed to the CLI as a single argv element,
+never through a shell, and the charset keeps it from being mistaken for
+anything else. Nothing in this file can name a path, a binary, or a permission
+level; those stay in the environment, where only the operator can set them.
+
+A corrupt or unreadable file logs a warning and falls back to the environment
+rather than stopping the server.
+
 ## Browser-side hardening
 
 Responses carry a strict CSP (`default-src 'none'`, no external origins),

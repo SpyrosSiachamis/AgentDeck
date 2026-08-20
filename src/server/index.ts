@@ -5,6 +5,7 @@ import { AdapterRegistry } from './adapters/registry.js';
 import { SessionManager } from './sessions/manager.js';
 import { SessionStore } from './sessions/store.js';
 import { buildServer } from './http.js';
+import { SettingsStore } from './settings.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -24,10 +25,12 @@ async function main(): Promise<void> {
   }
 
   const store = new SessionStore(config.stateDir, log);
-  const sessions = new SessionManager(config, log, workspaces, store, adapters);
+  const settings = new SettingsStore(config, log);
+  await settings.init();
+  const sessions = new SessionManager(config, log, workspaces, store, adapters, settings);
   await sessions.init();
 
-  const { app, hub } = await buildServer({ config, log, workspaces, sessions, adapters });
+  const { app, hub } = await buildServer({ config, log, workspaces, sessions, adapters, settings });
 
   await app.listen({ host: config.host, port: config.port });
 

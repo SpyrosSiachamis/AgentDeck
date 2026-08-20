@@ -6,6 +6,7 @@ import { AdapterError, AdapterRegistry } from '../adapters/registry.js';
 import { DEFAULT_TITLE, Session, type SessionSummary } from './session.js';
 import type { SessionEvent } from './events.js';
 import { SessionStore, type PersistedSession } from './store.js';
+import type { SettingsStore } from '../settings.js';
 
 export class SessionLimitError extends Error {
   readonly code = 'session_limit';
@@ -38,6 +39,8 @@ export class SessionManager {
     private readonly workspaces: WorkspaceRegistry,
     private readonly store: SessionStore,
     private readonly adapters: AdapterRegistry,
+    /** Optional so existing callers and tests keep working without one. */
+    private readonly settings?: SettingsStore,
   ) {}
 
   async init(): Promise<void> {
@@ -105,7 +108,9 @@ export class SessionManager {
         ? workspace.adapterId === adapterId
         : adapterId === this.adapters.defaultId();
       if (matchesAdapter && workspace.model) return workspace.model;
-      return this.adapters.modelFor(adapterId);
+      // A model chosen in the settings page replaces the environment default,
+      // but never overrides the more specific per-workspace configuration.
+      return this.settings?.modelFor(adapterId) ?? this.adapters.modelFor(adapterId);
     };
 
     const resolvePermissionMode = (): string | null => {

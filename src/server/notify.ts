@@ -4,6 +4,7 @@ import type { SessionManager } from './sessions/manager.js';
 import type { Session } from './sessions/session.js';
 import type { SessionEvent } from './sessions/events.js';
 import type { PushPayload, PushService } from './push.js';
+import type { SettingsStore } from './settings.js';
 
 /**
  * Translates session events into the handful of pushes worth waking a phone
@@ -93,6 +94,8 @@ export class SessionNotifier {
     private readonly config: Config,
     private readonly log: Logger,
     private readonly push: PushService,
+    /** Lets the settings page turn "turn finished" pushes off at runtime. */
+    private readonly settings?: SettingsStore,
   ) {}
 
   attach(sessions: SessionManager): void {
@@ -118,7 +121,7 @@ export class SessionNotifier {
     return payloadForEvent(event, {
       title: session.summary().title,
       sessionId: session.id,
-      notifyTurnFinished: this.config.push.notifyTurnFinished,
+      notifyTurnFinished: this.settings?.notifyTurnFinished() ?? this.config.push.notifyTurnFinished,
     });
   }
 

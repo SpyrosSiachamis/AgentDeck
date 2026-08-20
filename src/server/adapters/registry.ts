@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { buildChildEnv } from './env.js';
 import { makeClaudeCodeFactory } from './claude-code.js';
 import { makeAntigravityFactory } from './antigravity.js';
 import type { AdapterDescriptor, CLIAdapterFactory } from './types.js';
@@ -26,6 +28,11 @@ type AdapterDefinition = {
   defaultCommand: string;
   persistentProcess: boolean;
   supportsPermissionPrompts: boolean;
+  /**
+   * Whether `<command> models` prints a usable list. Only some CLIs do, and
+   * the settings page offers a picker only for those.
+   */
+  listsModels: boolean;
   note: string;
   build: (command: string) => CLIAdapterFactory;
 };
@@ -37,6 +44,7 @@ const DEFINITIONS: readonly AdapterDefinition[] = [
     defaultCommand: 'claude',
     persistentProcess: true,
     supportsPermissionPrompts: true,
+    listsModels: false,
     note: 'One long-lived process per session. Asks before running a risky command, and cancelling interrupts the turn without ending the session.',
     build: makeClaudeCodeFactory,
   },
@@ -48,6 +56,7 @@ const DEFINITIONS: readonly AdapterDefinition[] = [
     // The CLI has no approval channel of its own; AgentDeck brokers shell
     // commands on its behalf, which covers command execution but not file edits.
     supportsPermissionPrompts: true,
+    listsModels: true,
     note: 'One long-lived process per session. Asks before running a shell command; its file edits are not gated.',
     build: makeAntigravityFactory,
   },
@@ -134,6 +143,7 @@ export class AdapterRegistry {
         available: isExecutableOnPath(command),
         persistentProcess: definition.persistentProcess,
         supportsPermissionPrompts: definition.supportsPermissionPrompts,
+        listsModels: definition.listsModels,
         note: definition.note,
       });
     });
@@ -180,6 +190,105 @@ export class AdapterRegistry {
   displayName(id: string): string {
     return this.definitions.get(id)?.displayName ?? id;
   }
+
+  /**
+   * Ask a CLI which models it offers, for the settings picker. The result is
+   * cached: the call is a network round trip on at least one agent, and a
+   * settings page should not wait seconds every time it opens.
+   */
+  async listModels(id: string): Promise<{ id: string; label: string }[]> {
+    const definition = this.definitions.get(id);
+    if (!definition?.listsModels) {
+      throw new AdapterError(`${definition?.displayName ?? id} cannot list its models`, 'unknown_adapter');
+    }
+    const cached = this.modelCache.get(id);
+    if (cached && Date.now() - cached.at < MODEL_CACHE_MS) return cached.models;
+
+    const command = this.commandFor(definition);
+    if (!isExecutableOnPath(command)) {
+      throw new AdapterError(`"${command}" was not found on PATH.`, 'adapter_unavailable');
+    }
+
+    const models = parseModelList(await runModelList(command));
+    this.modelCache.set(id, { at: Date.now(), models });
+    return models;
+  }
+
+  private readonly modelCache = new Map<string, { at: number; models: { id: string; label: string }[] }>();
+}
+
+const MODEL_CACHE_MS = 10 * 60 * 1000;
+const MODEL_LIST_TIMEOUT_MS = 20_000;
+const MODEL_LIST_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Run `<command> models` and return its stdout.
+ *
+ * stdin is closed rather than left as an open pipe: these CLIs also read
+ * instructions from stdin, and at least one of them blocks forever on a pipe
+ * that never reaches EOF instead of printing its model list.
+ */
+function runModelList(command: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, ['models'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildChildEnv(process.env),
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const finish = (err: Error | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(stdout);
+    };
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(new AdapterError(`"${command} models" timed out.`, 'adapter_unavailable'));
+    }, MODEL_LIST_TIMEOUT_MS);
+    timer.unref?.();
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > MODEL_LIST_MAX_BYTES) {
+        child.kill('SIGKILL');
+        finish(new AdapterError(`"${command} models" produced too much output.`, 'adapter_unavailable'));
+      }
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk.slice(0, 4000);
+    });
+
+    child.on('error', (err) => finish(new AdapterError(`Could not run "${command} models": ${err.message}`, 'adapter_unavailable')));
+    child.on('close', (code) => {
+      if (code === 0) return finish(null);
+      // The CLI's own words are far more useful than "exited 1".
+      const detail = stderr.trim().split('\n').at(-1) ?? `exit code ${code}`;
+      finish(new AdapterError(`"${command} models" failed: ${detail}`, 'adapter_unavailable'));
+    });
+  });
+}
+
+/** Lines are "<id>\t<human label>"; anything else is chatter like a spinner. */
+export function parseModelList(stdout: string): { id: string; label: string }[] {
+  const models: { id: string; label: string }[] = [];
+  const seen = new Set<string>();
+  for (const line of stdout.split('\n')) {
+    const [rawId, ...rest] = line.split('\t');
+    const id = rawId?.trim() ?? '';
+    if (!id || rest.length === 0) continue;
+    if (!/^[A-Za-z0-9._:@/-]{1,120}$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    models.push({ id, label: rest.join(' ').trim() || id });
+  }
+  return models;
 }
 
 export function listAdapterIds(): string[] {

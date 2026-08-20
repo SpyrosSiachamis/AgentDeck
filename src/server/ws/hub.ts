@@ -24,6 +24,8 @@ class Connection {
   /** Coalesce bursts of deltas into one frame per tick. */
   private readonly outbox = new Map<string, SessionEvent[]>();
   private flushScheduled = false;
+  /** Sessions this client currently has on screen, per its own reporting. */
+  private readonly visibleSessions = new Set<string>();
 
   constructor(
     readonly socket: WebSocket,
@@ -140,7 +142,18 @@ class Connection {
         }
         return;
       }
+
+      case 'presence': {
+        // Advisory only: a wrong answer costs at most one extra notification.
+        if (msg.visible) this.visibleSessions.add(msg.sessionId);
+        else this.visibleSessions.delete(msg.sessionId);
+        return;
+      }
     }
+  }
+
+  isWatching(sessionId: string): boolean {
+    return this.socket.readyState === this.socket.OPEN && this.visibleSessions.has(sessionId);
   }
 
   private async subscribe(sessionId: string, sinceSeq: number): Promise<void> {
@@ -209,6 +222,7 @@ class Connection {
     this.closed = true;
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
+    this.visibleSessions.clear();
   }
 }
 
@@ -287,6 +301,14 @@ export class WebSocketHub {
     socket.on('error', (err: Error) => {
       this.deps.log.warn({ err: err.message }, 'websocket error');
     });
+  }
+
+  /** True while at least one connected client reports this session on screen. */
+  hasVisibleWatcher(sessionId: string): boolean {
+    for (const connection of this.connections) {
+      if (connection.isWatching(sessionId)) return true;
+    }
+    return false;
   }
 
   broadcastSessions(): void {

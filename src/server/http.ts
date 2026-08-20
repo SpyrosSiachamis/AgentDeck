@@ -18,6 +18,8 @@ import {
 } from './sessions/session.js';
 import { GitService } from './git.js';
 import { WebSocketHub } from './ws/hub.js';
+import { PushError, PushService } from './push.js';
+import { SessionNotifier } from './notify.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(here, '../web');
@@ -37,6 +39,15 @@ const createSessionSchema = z.object({
 
 const instructSchema = z.object({ text: z.string().min(1) });
 
+const pushSubscriptionSchema = z.object({
+  endpoint: z.string().min(1).max(2048),
+  expirationTime: z.number().nullable().optional(),
+  keys: z.object({
+    p256dh: z.string().min(1).max(256),
+    auth: z.string().min(1).max(256),
+  }),
+});
+
 export type AppDeps = {
   config: Config;
   log: Logger;
@@ -48,7 +59,12 @@ export type AppDeps = {
 export async function buildServer(deps: AppDeps) {
   const { config, log, workspaces, sessions, adapters } = deps;
   const git = new GitService(config, workspaces);
+  const push = await PushService.create(config, log);
+  const notifier = new SessionNotifier(config, log, push);
+  notifier.attach(sessions);
   const hub = new WebSocketHub({ config, log, sessions, workspaces, adapters });
+  // The hub knows which sessions are on screen; the notifier uses that to stay quiet.
+  notifier.setVisibilityProbe((sessionId) => hub.hasVisibleWatcher(sessionId));
 
   const app = Fastify({
     loggerInstance: log,
@@ -99,7 +115,8 @@ export async function buildServer(deps: AppDeps) {
     reply.header(
       'Content-Security-Policy',
       "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
-        "connect-src 'self' ws: wss:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "connect-src 'self' ws: wss:; font-src 'self'; worker-src 'self'; manifest-src 'self'; " +
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     );
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'no-referrer');
@@ -127,6 +144,7 @@ export async function buildServer(deps: AppDeps) {
     sessions: { live: sessions.liveCount, total: sessions.list().length },
     workspaces: workspaces.list().length,
     agents: adapters.list().map((a) => ({ id: a.id, available: a.available })),
+    push: { enabled: push.enabled, devices: push.count },
     version: process.env.npm_package_version ?? '0.1.0',
   }));
 
@@ -245,6 +263,44 @@ export async function buildServer(deps: AppDeps) {
     return { ok: true, deleted: id };
   });
 
+  // ------------------------------------------------------------- push routes
+  // The PWA needs the VAPID public key before it can subscribe; it is public by
+  // design (the private half never leaves the server).
+  app.get('/api/push/config', async (req) => ({
+    push: push.summary(identityLabel(req.identity)),
+    /** iOS only allows push from a PWA installed to the Home Screen. */
+    requiresInstall: true,
+  }));
+
+  app.post('/api/push/subscribe', async (req, reply) => {
+    const body = pushSubscriptionSchema.parse(req.body);
+    const record = await push.add(body, {
+      identity: identityLabel(req.identity),
+      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+    });
+    return reply.code(201).send({ ok: true, id: record.id, push: push.summary(identityLabel(req.identity)) });
+  });
+
+  app.post('/api/push/unsubscribe', async (req) => {
+    const body = z.object({ endpoint: z.string().min(1).max(2048) }).parse(req.body);
+    const removed = await push.remove(body.endpoint);
+    return { ok: true, removed, push: push.summary(identityLabel(req.identity)) };
+  });
+
+  app.post('/api/push/test', async (req) => {
+    if (!push.enabled) throw new PushError('Web push is disabled on this server', 'push_disabled', 409);
+    const result = await push.send({
+      kind: 'test',
+      title: 'DevTunnel notifications are on',
+      body: 'Approvals and finished turns will reach you here.',
+      tag: 'devtunnel-test',
+      url: '/',
+      sessionId: null,
+      ts: Date.now(),
+    });
+    return { ok: true, ...result };
+  });
+
   app.get('/api/workspaces/:id/git/status', async (req) => {
     const { id } = req.params as { id: string };
     const workspace = workspaces.require(id);
@@ -279,13 +335,18 @@ export async function buildServer(deps: AppDeps) {
     return reply.sendFile('index.html');
   });
 
-  return { app, hub };
+  app.addHook('onClose', async () => {
+    notifier.detach();
+  });
+
+  return { app, hub, push };
 }
 
 function errorCode(err: unknown): string {
   if (err instanceof WorkspaceError) return err.code;
   if (err instanceof AdapterError) return err.code;
   if (err instanceof AuthorizationError) return 'forbidden';
+  if (err instanceof PushError) return err.code;
   if (err instanceof SessionBusyError || err instanceof SessionNotRunningError) return err.code;
   if (err instanceof PermissionNotFoundError || err instanceof PermissionUnsupportedError) return err.code;
   if (err instanceof z.ZodError) return 'invalid_request';
@@ -295,6 +356,7 @@ function errorCode(err: unknown): string {
 
 function mapErrorStatus(err: unknown): number {
   if (err instanceof AuthorizationError) return err.status;
+  if (err instanceof PushError) return err.status;
   if (err instanceof z.ZodError) return 400;
   if (err instanceof WorkspaceError) return err.code === 'unknown_workspace' ? 404 : 403;
   if (err instanceof AdapterError) return err.code === 'unknown_adapter' ? 404 : 409;

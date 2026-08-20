@@ -158,6 +158,44 @@ the repositories themselves. It is not encrypted; keep it on an encrypted disk
 and keep it out of version control (`.gitignore` covers `.data/` and
 `workspaces.json`).
 
+## Push notifications: the one outbound path
+
+Everything else in this app stays inside the tailnet. Web Push does not: to wake
+a locked phone the server must POST to Apple's, Google's or Mozilla's push
+service, whichever the browser chose. That is a deliberate, single, opt-outable
+exception (`PUSH_ENABLED=false` stops it entirely, including key generation).
+
+What crosses that boundary:
+
+- **Encrypted payload.** The body is encrypted to the device's own key pair per
+  RFC 8291 (`aes128gcm`), signed with a VAPID key per RFC 8292. The push service
+  relays ciphertext; it cannot read the session title or the command text.
+- **Metadata it does see.** That a notification was sent, when, how large, and to
+  which device endpoint. Traffic analysis of "this developer is active now" is
+  possible; the content is not.
+- **What the payload says.** The session title plus one line: the tool name and
+  the command awaiting approval, or the first line of a turn's result. It is
+  truncated to fit the push size limit. Do not enable push if a command line is
+  itself the secret.
+
+Stored state, both mode `0600` under `STATE_DIR/push/`:
+
+- `vapid.json` — the server's key pair. The private half is never served; only
+  the public key reaches the browser. Deleting it invalidates every device.
+- `subscriptions.json` — one record per registered device: its push endpoint
+  URL, public keys, and the tailnet identity that registered it. **An endpoint
+  URL is a bearer capability**: anyone holding it can send that device a
+  notification. The API therefore returns device *counts*, never endpoints, and
+  the logs record only the push service's hostname.
+
+Registering a device requires the same authorization as every other route, so
+only a tailnet user who can already drive your sessions can add one. Endpoints
+are dropped automatically on `404`/`410` (the browser discarded the
+subscription) or after `PUSH_MAX_FAILURES` consecutive delivery errors.
+
+The service worker only ever calls `showNotification`; it caches nothing and
+intercepts no requests, so it cannot serve a stale bundle or observe traffic.
+
 ## Browser-side hardening
 
 Responses carry a strict CSP (`default-src 'none'`, no external origins),
@@ -165,7 +203,8 @@ Responses carry a strict CSP (`default-src 'none'`, no external origins),
 `X-Frame-Options: DENY`. The client uses no CDN, no external fonts and no
 analytics. All rendering uses `textContent`, never `innerHTML`, so CLI output
 cannot inject markup. 5xx responses return a generic message; details stay in
-the server log.
+the server log. `worker-src 'self'` and `manifest-src 'self'` are the only
+additions the PWA needed; both stay same-origin.
 
 ## Approving tool use
 
@@ -175,10 +214,36 @@ the server log.
 | --- | --- |
 | `default` | Asks before anything risky. You approve or deny it from the phone. |
 | `acceptEdits` | Edits confined to the workspace proceed silently (`acceptEdits` / `--mode accept-edits`). |
-| `full` | Never asks (`bypassPermissions` on Claude, `--dangerously-skip-permissions` on Antigravity). |
+| `full` | Never asks: `bypassPermissions` on Claude, and on Antigravity the command broker is not started at all. |
 
-With Claude Code and Antigravity CLI the request travels over the CLI's control channel and the turn
-**blocks** until it is answered, so:
+How the request reaches you differs by agent, and the difference is a security
+property, not a detail:
+
+- **Claude Code** is launched with `--permission-prompt-tool stdio`. Every tool
+  request travels over the CLI's own control channel and the turn blocks until
+  it is answered.
+- **Antigravity CLI** has no such channel. Headless it will only auto-deny every
+  tool (`request-review`, which makes it unusable) or run unattended with
+  `--dangerously-skip-permissions`; `can_use_tool` does not exist in that binary.
+  DevTunnel therefore brokers its **shell commands**: it prepends a private
+  directory to the child's `PATH` containing its own `zsh`, `bash` and `sh`.
+  Each is a small Node program that sends the command line to the server over a
+  unix socket in a `0700` directory, blocks until a human answers, and only then
+  execs the real shell. It **fails closed** — an unreachable or shut-down broker
+  denies rather than runs. The socket and shims are deleted when the session
+  ends.
+
+  **This gates command execution, not file modification.** That CLI edits files
+  inside its own process without invoking a shell, so its writes are not
+  brokered; workspace allowlisting and `git` remain the controls there. Choose
+  Claude Code when edits must be approved too. `CLI_PERMISSION_MODE=full`
+  disables the broker.
+
+  The shim cannot be bypassed by the agent choosing a different shell: the CLI
+  picks the shell by name and resolves it through `PATH`, and any command that
+  would alter `PATH` has to pass the broker first.
+
+In both cases the turn **blocks** until the request is answered, so:
 
 - Only a request the CLI actually raised can be answered; ids are validated
   against the session's pending set, and answering twice is refused.
@@ -198,5 +263,9 @@ With Claude Code and Antigravity CLI the request travels over the CLI's control 
 - [ ] `ALLOWED_TAILSCALE_USERS` set if others share your tailnet.
 - [ ] Tailnet ACLs restrict which devices may reach this machine's port 443.
 - [ ] `.data/` lives on an encrypted disk.
+- [ ] Push is off (`PUSH_ENABLED=false`) if no traffic may leave the tailnet,
+      or the notification content is understood and accepted if it is on.
+- [ ] If sessions run on the Antigravity CLI, its **file edits are not gated** —
+      the workspaces it can reach are ones you would let it change.
 - [ ] Repositories with production credentials in `.env` files are **not**
       registered — the AI can read them.

@@ -28,6 +28,15 @@ export const clientMessageSchema = z.discriminatedUnion('t', [
     reason: z.string().max(500).optional(),
   }),
   z.object({ t: z.literal('list_sessions') }),
+  /**
+   * "This session is on screen in front of a human right now." Lets the server
+   * skip a push notification the user would only be duplicating with their eyes.
+   */
+  z.object({
+    t: z.literal('presence'),
+    sessionId: z.string().min(1).max(64),
+    visible: z.boolean(),
+  }),
 ]);
 
 export type ClientMessage = z.infer<typeof clientMessageSchema>;

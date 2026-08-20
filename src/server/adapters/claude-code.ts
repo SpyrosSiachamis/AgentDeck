@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { buildChildEnv } from './env.js';
+import { compactInput, safeStringify, summariseToolInput } from './summary.js';
 import { truncateText, type SessionEventBody } from '../sessions/events.js';
 import { normalizePermissionMode } from './types.js';
 import type {
@@ -700,46 +701,6 @@ function flattenContent(content: unknown): string {
       return '';
     })
     .join('\n');
-}
-
-function safeStringify(value: unknown, max = 4000): string {
-  try {
-    const out = JSON.stringify(value);
-    return out === undefined ? '' : out.slice(0, max);
-  } catch {
-    return '[unserialisable]';
-  }
-}
-
-/** Keep tool input small enough to stream to a phone. */
-function compactInput(input: unknown, max: number): unknown {
-  if (input == null || typeof input !== 'object') return input;
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(input as Json)) {
-    out[key] = typeof value === 'string' ? truncateText(value, Math.min(max, 4000)).text : value;
-  }
-  return out;
-}
-
-/** A one-line, human-readable description for the activity feed. */
-export function summariseToolInput(name: string, input: unknown, max: number): string {
-  if (!input || typeof input !== 'object') return name;
-  const i = input as Json;
-  const pick = (key: string): string | undefined =>
-    typeof i[key] === 'string' ? (i[key] as string) : undefined;
-
-  const candidate =
-    pick('command') ??
-    pick('file_path') ??
-    pick('path') ??
-    pick('pattern') ??
-    pick('query') ??
-    pick('url') ??
-    pick('prompt') ??
-    pick('description');
-
-  const text = candidate ?? safeStringify(i, max);
-  return truncateText(text.replace(/\s+/g, ' ').trim(), max).text;
 }
 
 export function makeClaudeCodeFactory(command: string): CLIAdapterFactory {

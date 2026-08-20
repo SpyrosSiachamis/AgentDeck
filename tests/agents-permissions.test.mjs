@@ -22,7 +22,9 @@ test('both agents are offered, and a session runs on the one that was chosen', a
   const agy = agents.find((a) => a.id === 'antigravity-cli');
   assert.equal(claude.supportsPermissionPrompts, true);
   assert.equal(claude.persistentProcess, true);
-  assert.equal(agy.supportsPermissionPrompts, false);
+  // The Antigravity CLI cannot prompt on its own; DevTunnel brokers its shell
+  // commands, so sessions on it do ask before running one.
+  assert.equal(agy.supportsPermissionPrompts, true);
   assert.equal(agy.persistentProcess, true);
   assert.equal(agy.displayName, 'Antigravity CLI');
   // The picker needs a path, but never a filesystem path.

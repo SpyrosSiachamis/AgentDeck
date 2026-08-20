@@ -322,6 +322,12 @@ async function main() {
       '# AGY_COMMAND=agy',
       '# AGY_MODEL=',
       '',
+      '# Push notifications for the installed PWA. This is the only part of the',
+      '# app that reaches the public internet (Apple/Google/Mozilla push services).',
+      'PUSH_ENABLED=true',
+      'PUSH_NOTIFY_TURN_FINISHED=true',
+      'VAPID_SUBJECT=mailto:terminal-agent@localhost',
+      '',
       'MAX_CONCURRENT_SESSIONS=4',
       'LOG_LEVEL=info',
       'LOG_PRETTY=false',
@@ -367,6 +373,8 @@ async function main() {
     console.log(`     ${c.bold(c.brightGreen('npm run serve:tailscale'))}\n`);
     console.log(`  ${c.brightCyan('3.')} Open the printed HTTPS URL on your phone and tap:`);
     console.log(`     ${c.yellow('Share → Add to Home Screen')} ${c.dim('(for a standalone full-screen web app)')}\n`);
+    console.log(`  ${c.brightCyan('4.')} Launch it ${c.bold('from the new Home Screen icon')}, then tap the bell and`);
+    console.log(`     turn notifications on ${c.dim('(iOS only delivers push to an installed app)')}\n`);
 
     console.log(c.dim('Background service options:'));
     console.log(`  • macOS launchd: ${c.cyan('deploy/com.terminal-agent.plist')}`);

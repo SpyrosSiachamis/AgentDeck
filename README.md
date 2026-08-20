@@ -85,6 +85,47 @@ After running setup:
    - Navigate to the printed HTTPS URL in Safari (iOS) or Chrome (Android).
    - Tap **Share → Add to Home Screen** for a full-screen, app-like development console.
 
+4. **Turn on notifications** (see below) so the phone wakes you when the agent needs you.
+
+---
+
+## Push Notifications on your Phone
+
+The point of leaving an agent running is that you can put the phone away. DevTunnel
+uses Web Push so a locked phone still buzzes when:
+
+- the agent **needs an approval** for a command (this one blocks the CLI until you answer), or
+- a **turn finishes**, successfully or with an error.
+
+### Turning them on (iPhone / iPad)
+
+Apple only delivers push to an **installed** PWA, so the order matters:
+
+1. Open the `https://…ts.net` URL in **Safari** (iOS 16.4 or newer).
+2. **Share → Add to Home Screen**.
+3. Launch DevTunnel **from the new Home Screen icon**, not from the Safari tab.
+4. Tap the 🔔 button in the header → **Turn on**, and accept the iOS prompt.
+5. Use **Send a test notification** to confirm the round trip.
+
+Android and desktop Chrome/Edge/Firefox skip step 1–3: the 🔔 toggle works in a
+normal tab, though installing still helps the notifications survive a closed browser.
+
+If the sheet refuses to show a toggle it will say why — not installed yet, served
+over plain `http`, permission blocked in system settings, or push disabled server-side.
+
+### What it costs you
+
+Delivery goes through Apple's, Google's or Mozilla's push service, so this is the
+**one part of DevTunnel that leaves your tailnet**. A notification carries the session
+title and a one-line summary of the command awaiting approval. Everything is encrypted
+end to end (RFC 8291) — the push service can see the size and timing, not the content.
+If that is not a trade you want, set `PUSH_ENABLED=false` and the whole subsystem,
+including the VAPID key generation, never starts.
+
+The keys live in `${STATE_DIR}/push/vapid.json` and registered devices in
+`${STATE_DIR}/push/subscriptions.json`, both mode `0600`. Deleting `vapid.json`
+invalidates every device and everyone has to turn notifications on again.
+
 ---
 
 ## Multi-Device & Team Setup
@@ -168,9 +209,46 @@ Open the HTTPS URL on Safari or Chrome on your phone (connected to your tailnet)
 - **Add to Home Screen**: Tap **Share → Add to Home Screen** for a full-screen, standalone app.
 - **Home Screen**: Lists registered workspaces, active sessions, and history.
 - **Start / Reattach**: Tap a workspace to start a new session or reopen an ongoing one.
-- **Approvals**: When an agent requests a shell command or risky action, an **Approve / Deny** prompt appears with the exact command.
+- **Approvals**: When an agent wants to run a shell command or another risky action, an **Approve / Deny** prompt appears with the exact command. Nothing runs until you answer, and an unanswered request is denied after `PERMISSION_TIMEOUT_MS`.
+- **Reload**: The ↻ button in the session header re-reads the whole transcript from the server.
 - **Controls**: Send instructions via the composer. Tap ■ to cancel a running task without losing context.
 - **Git Inspector**: View branch, modified files, and line-by-line diffs.
+
+## Approvals, per agent
+
+Both agents stop and ask before doing something risky, but they get there
+differently, and the difference matters:
+
+| | Claude Code | Antigravity CLI (Gemini) |
+| --- | --- | --- |
+| Shell commands | Asks, over the CLI's own control channel | Asks, via DevTunnel's shell broker |
+| File edits | Asks (unless `acceptEdits`) | **Not gated** — see below |
+| Cancels cleanly mid-turn | Yes | Yes |
+
+Claude Code exposes `--permission-prompt-tool`, so it hands each tool request to
+DevTunnel and blocks until you answer.
+
+The Antigravity CLI has no such channel. Run it headless and it offers only two
+behaviours: its `request-review` mode auto-**denies** every tool (the turn just
+fails), or `--dangerously-skip-permissions` runs everything unattended. Neither
+is "ask the phone".
+
+What it does do is run every shell command as `<shell> -c "<command>"`, resolving
+the shell through `PATH`. So DevTunnel puts its own `zsh`/`bash`/`sh` at the
+front of that `PATH`. Each is a tiny program that hands the command line back to
+the server and waits; you get the normal Approve / Deny card and push
+notification, and only then does it exec the real shell. Deny it and the agent
+sees a failed command and adapts. If the broker cannot be reached, the command is
+**denied** — it fails closed.
+
+**The limitation, stated plainly:** this gates shell commands. The Antigravity
+CLI writes and edits files inside its own process without going through a shell,
+so those edits are **not** gated. Keep it pointed at workspaces you are willing
+to let it change, and use git to review. Claude Code is the one to pick when you
+want edits gated too.
+
+Set `CLI_PERMISSION_MODE=full` to switch the broker off and let the agent run
+genuinely unattended.
 
 ## How it talks to the agents
 
@@ -220,11 +298,16 @@ Every setting is documented in [.env.example](.env.example). Key settings:
 | `CLI_DEFAULT_ADAPTER` | `claude-code` | Agent used when none is explicitly specified |
 | `CLAUDE_COMMAND` | `claude` | Custom binary name or path for Claude Code |
 | `AGY_COMMAND` | `agy` | Custom binary name or path for Antigravity CLI |
-| `CLI_PERMISSION_MODE` | `default` | `default`, `acceptEdits`, or `full` |
+| `CLI_PERMISSION_MODE` | `default` | `default`, `acceptEdits`, or `full`. `full` disables approvals entirely |
 | `PERMISSION_TIMEOUT_MS` | `900000` (15m) | Auto-denies an unanswered approval |
 | `MAX_CONCURRENT_SESSIONS` | `4` | Maximum concurrent active CLI processes |
 | `TURN_TIMEOUT_MS` | `1800000` (30m) | Timeout before auto-cancelling a runaway task |
 | `SESSION_IDLE_TIMEOUT_MS` | `21600000` (6h) | Reaps forgotten inactive sessions |
+| `PUSH_ENABLED` | `true` | Web Push for the installed PWA. `false` disables it entirely |
+| `PUSH_NOTIFY_TURN_FINISHED` | `true` | Notify when a turn ends, not only on approvals |
+| `PUSH_SUPPRESS_WHEN_VISIBLE` | `true` | Skip a "done" push while the session is on screen |
+| `VAPID_SUBJECT` | `mailto:terminal-agent@localhost` | Contact claim sent to the push service |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | *(generated)* | Supply your own keys instead of the generated pair |
 
 ## Running as a Background Service
 

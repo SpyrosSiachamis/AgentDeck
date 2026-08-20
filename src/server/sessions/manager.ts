@@ -4,6 +4,7 @@ import type { Logger } from '../logger.js';
 import { WorkspaceError, type WorkspaceRegistry } from '../workspaces.js';
 import { AdapterError, AdapterRegistry } from '../adapters/registry.js';
 import { DEFAULT_TITLE, Session, type SessionSummary } from './session.js';
+import type { SessionEvent } from './events.js';
 import { SessionStore, type PersistedSession } from './store.js';
 
 export class SessionLimitError extends Error {
@@ -27,6 +28,8 @@ export class SessionManager {
   private readonly sessions = new Map<string, Session>();
   private sweepTimer: NodeJS.Timeout | null = null;
   private readonly globalStateListeners = new Set<(summary: SessionSummary) => void>();
+  /** Fires for every event of every session, for cross-cutting concerns (push). */
+  private readonly globalEventListeners = new Set<(event: SessionEvent, session: Session) => void>();
   private shuttingDown = false;
 
   constructor(
@@ -139,12 +142,29 @@ export class SessionManager {
     session.onStateChange((summary) => {
       for (const listener of this.globalStateListeners) listener(summary);
     });
+    session.subscribe((events) => {
+      if (this.globalEventListeners.size === 0) return;
+      for (const event of events) {
+        for (const listener of this.globalEventListeners) {
+          try {
+            listener(event, session);
+          } catch (err) {
+            this.log.warn({ sessionId: session.id, err: (err as Error).message }, 'global event listener failed');
+          }
+        }
+      }
+    });
     return session;
   }
 
   onSessionState(listener: (summary: SessionSummary) => void): () => void {
     this.globalStateListeners.add(listener);
     return () => this.globalStateListeners.delete(listener);
+  }
+
+  onSessionEvent(listener: (event: SessionEvent, session: Session) => void): () => void {
+    this.globalEventListeners.add(listener);
+    return () => this.globalEventListeners.delete(listener);
   }
 
   get liveCount(): number {

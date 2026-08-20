@@ -79,6 +79,26 @@ const envSchema = z.object({
 
   GIT_TIMEOUT_MS: int(10_000, 500, 120_000),
   MAX_GIT_DIFF_BYTES: int(1024 * 1024, 4096, 32 * 1024 * 1024),
+
+  /**
+   * Web Push. The PWA on a phone is only useful if it can wake you up, so this
+   * is on by default; a VAPID key pair is generated into STATE_DIR on first run
+   * unless one is supplied here.
+   */
+  PUSH_ENABLED: bool(true),
+  VAPID_PUBLIC_KEY: z.string().default(''),
+  VAPID_PRIVATE_KEY: z.string().default(''),
+  /** VAPID "sub" claim. Push services require a mailto: or https: URL. */
+  VAPID_SUBJECT: z.string().default('mailto:terminal-agent@localhost'),
+  /** How long a push service should hold an undelivered notification. */
+  PUSH_TTL_SECONDS: int(30 * 60, 0, 7 * 24 * 60 * 60),
+  /** Consecutive delivery failures before a subscription is dropped. */
+  PUSH_MAX_FAILURES: int(5, 1, 100),
+  /** Skip the push when the session is already on screen in an open client. */
+  PUSH_SUPPRESS_WHEN_VISIBLE: bool(true),
+  /** Notify when a turn ends, not just when an approval is needed. */
+  PUSH_NOTIFY_TURN_FINISHED: bool(true),
+  MAX_PUSH_SUBSCRIPTIONS: int(20, 1, 200),
 });
 
 export type Config = Readonly<{
@@ -111,6 +131,17 @@ export type Config = Readonly<{
   maxWsPayloadBytes: number;
   gitTimeoutMs: number;
   maxGitDiffBytes: number;
+  push: Readonly<{
+    enabled: boolean;
+    publicKey: string;
+    privateKey: string;
+    subject: string;
+    ttlSeconds: number;
+    maxFailures: number;
+    suppressWhenVisible: boolean;
+    notifyTurnFinished: boolean;
+    maxSubscriptions: number;
+  }>;
 }>;
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
@@ -186,5 +217,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxWsPayloadBytes: parsed.MAX_WS_PAYLOAD_BYTES,
     gitTimeoutMs: parsed.GIT_TIMEOUT_MS,
     maxGitDiffBytes: parsed.MAX_GIT_DIFF_BYTES,
+    push: Object.freeze({
+      enabled: parsed.PUSH_ENABLED,
+      publicKey: parsed.VAPID_PUBLIC_KEY.trim(),
+      privateKey: parsed.VAPID_PRIVATE_KEY.trim(),
+      subject: parsed.VAPID_SUBJECT.trim() || 'mailto:terminal-agent@localhost',
+      ttlSeconds: parsed.PUSH_TTL_SECONDS,
+      maxFailures: parsed.PUSH_MAX_FAILURES,
+      suppressWhenVisible: parsed.PUSH_SUPPRESS_WHEN_VISIBLE,
+      notifyTurnFinished: parsed.PUSH_NOTIFY_TURN_FINISHED,
+      maxSubscriptions: parsed.MAX_PUSH_SUBSCRIPTIONS,
+    }),
   });
 }

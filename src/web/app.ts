@@ -1,11 +1,17 @@
-/**
- * Remote dev console — mobile client.
- *
- * Deliberately framework-free: the streaming view appends to the DOM instead of
- * re-rendering, which keeps long sessions smooth on a phone.
- */
+import { renderMarkdownInto } from './markdown.js';
+import {
+  disablePush,
+  dismissNotification,
+  enablePush,
+  initPush,
+  isStandalone,
+  pushStatus,
+  sendTestPush,
+  type PushStatus,
+} from './push.js';
 
 type WorkspaceView = { id: string; name: string; enabled: boolean; isGitRepo: boolean };
+
 
 type AgentView = {
   id: string;
@@ -147,11 +153,16 @@ function connect(): void {
     // Re-attach to whatever the user was watching, continuing from the last
     // event we rendered so nothing is missed or duplicated.
     if (state.route.name === 'session') subscribe(state.route.sessionId);
+    // The new socket knows nothing about presence; re-declare it.
+    presenceSessionId = null;
+    reportPresence();
   };
 
   ws.onclose = () => {
     socket = null;
     setConn('offline');
+    // The server drops this connection's presence when it closes.
+    presenceSessionId = null;
     scheduleReconnect();
   };
 
@@ -178,6 +189,51 @@ function send(message: Record<string, unknown>): boolean {
 
 function subscribe(sessionId: string): void {
   send({ t: 'subscribe', sessionId, sinceSeq: state.lastSeq.get(sessionId) ?? 0 });
+}
+
+/** Subscribe without complaining when the socket is not up yet; onopen retries. */
+function subscribeQuiet(sessionId: string): void {
+  if (socket?.readyState === WebSocket.OPEN) subscribe(sessionId);
+}
+
+/**
+ * Rebuild the transcript from the server.
+ *
+ * `state.lastSeq` is what stops replayed events from being drawn twice, but it
+ * outlives the DOM: leaving a session and coming back, or a re-render when the
+ * session ends, produces an empty stream that the server then has nothing new
+ * to fill. So whenever a fresh stream is mounted, the history is re-read from
+ * scratch rather than resumed. Reading over HTTP rather than the socket reaches
+ * further back than the socket's replay window and works while it is down.
+ */
+async function loadTranscript(sessionId: string): Promise<void> {
+  const stream = streamEl;
+  if (!stream) return;
+
+  blockNodes.clear();
+  streamingText.clear();
+  state.lastSeq.set(sessionId, 0);
+
+  try {
+    const history = await api<{ events: SessionEvent[]; skipped: number }>(
+      `/api/sessions/${sessionId}/events?since=0&limit=2000`,
+    );
+    // A slow fetch can land after the user has navigated on; do not paint over
+    // whatever they are looking at now.
+    if (state.route.name !== 'session' || state.route.sessionId !== sessionId || streamEl !== stream) return;
+
+    stream.replaceChildren();
+    if (history.skipped > 0) {
+      appendNotice(`${history.skipped} older events are no longer kept.`);
+    }
+    for (const event of history.events) renderEvent(event);
+    scrollToBottom(true);
+  } catch {
+    // Offline, or the session is gone. The socket replay is the fallback.
+    state.lastSeq.set(sessionId, 0);
+  }
+
+  subscribeQuiet(sessionId);
 }
 
 function setConn(next: ConnState): void {
@@ -207,7 +263,7 @@ function handleMessage(message: ServerMessage): void {
       state.sessions = new Map(message.sessions.map((s) => [s.id, s]));
       setConn('online');
       render();
-      if (state.route.name === 'session') subscribe(state.route.sessionId);
+      if (state.route.name === 'session') void loadTranscript(state.route.sessionId);
       return;
 
     case 'sessions':
@@ -262,7 +318,8 @@ window.addEventListener('hashchange', () => {
   parseRoute();
   state.tab = 'chat';
   render();
-  if (state.route.name === 'session') subscribe(state.route.sessionId);
+  if (state.route.name === 'session') void loadTranscript(state.route.sessionId);
+  reportPresence();
 });
 
 // --------------------------------------------------------------------- views
@@ -297,7 +354,15 @@ function topbar(title: string, subtitle?: string, opts: { back?: boolean; action
 
 function homeView(): DocumentFragment {
   const fragment = document.createDocumentFragment();
-  fragment.append(topbar('Remote Dev Console', state.identity?.viaTailscale ? 'via Tailscale' : 'local access'));
+  const bell = el(
+    'button',
+    { class: 'icon-btn', id: 'notifications-btn', 'aria-label': 'Notifications', title: 'Notifications' },
+    '\u{1F514}',
+  );
+  bell.onclick = () => openNotificationSheet();
+  fragment.append(
+    topbar('DevTunnel', state.identity?.viaTailscale ? 'via Tailscale' : 'local access', { actions: [bell] }),
+  );
 
   const scroll = el('div', { class: 'scroll' });
   const sessions = [...state.sessions.values()];
@@ -455,18 +520,208 @@ async function startSession(workspace: WorkspaceView, adapterId: string): Promis
   }
 }
 
+// ------------------------------------------------------- notification sheet
+
+/**
+ * Everything about notifications lives behind one sheet, because on iOS the
+ * answer to "why didn't my phone buzz?" is almost always a setup step the user
+ * has not done yet. The sheet states which step that is.
+ */
+function openNotificationSheet(): void {
+  const sheet = el('div', { class: 'sheet' });
+  const panel = el('div', { class: 'sheet-panel' });
+  panel.append(el('div', { class: 'sheet-title' }, 'Notifications'));
+
+  const bodyEl = el('div', { class: 'push-body' }, el('div', { class: 'status-line' }, 'Checking…'));
+  panel.append(bodyEl);
+
+  const close = el('button', { class: 'btn' }, 'Close');
+  close.onclick = () => sheet.remove();
+  panel.append(close);
+
+  sheet.append(panel);
+  sheet.onclick = (event) => {
+    if (event.target === sheet) sheet.remove();
+  };
+  document.body.append(sheet);
+
+  const refresh = async (): Promise<void> => {
+    try {
+      bodyEl.replaceChildren(notificationPanel(await pushStatus(), refresh));
+    } catch (err) {
+      bodyEl.replaceChildren(el('div', { class: 'bubble error' }, (err as Error).message));
+    }
+  };
+  void refresh();
+}
+
+function notificationPanel(status: PushStatus, refresh: () => Promise<void>): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+
+  fragment.append(
+    el(
+      'div',
+      { class: 'push-explainer' },
+      'Get a notification when the agent needs an approval, or when it finishes a turn.',
+    ),
+  );
+
+  if (status.availability === 'needs-install') {
+    fragment.append(installInstructions());
+    return fragment;
+  }
+
+  if (status.availability !== 'ready') {
+    fragment.append(el('div', { class: 'bubble notice' }, status.detail));
+    if (status.availability === 'denied') {
+      const retry = el('button', { class: 'btn' }, 'Check again');
+      retry.onclick = () => void refresh();
+      fragment.append(el('div', { class: 'btn-row' }, retry));
+    }
+    return fragment;
+  }
+
+  const row = el('div', { class: 'push-row' });
+  row.append(
+    el(
+      'div',
+      { class: 'push-row-text' },
+      el('span', { class: 'push-row-title' }, status.subscribed ? 'Notifications are on' : 'Notifications are off'),
+      el(
+        'span',
+        { class: 'push-row-sub' },
+        status.subscribed
+          ? `This device is registered${status.devices > 1 ? ` (${status.devices} devices total)` : ''}.`
+          : 'This device will not be notified.',
+      ),
+    ),
+  );
+
+  const toggle = el(
+    'button',
+    { class: `btn ${status.subscribed ? 'danger' : 'primary'}` },
+    status.subscribed ? 'Turn off' : 'Turn on',
+  );
+  toggle.onclick = async () => {
+    toggle.setAttribute('disabled', 'true');
+    toggle.textContent = status.subscribed ? 'Turning off…' : 'Turning on…';
+    try {
+      // enablePush must stay inside this click: Safari drops a permission
+      // request that is not attached to a user gesture.
+      if (status.subscribed) await disablePush();
+      else await enablePush();
+      toast(status.subscribed ? 'Notifications turned off' : 'Notifications turned on');
+    } catch (err) {
+      toast((err as Error).message, 'error');
+    }
+    await refresh();
+  };
+  row.append(toggle);
+  fragment.append(row);
+
+  if (status.subscribed) {
+    const test = el('button', { class: 'btn' }, 'Send a test notification');
+    test.onclick = async () => {
+      test.setAttribute('disabled', 'true');
+      try {
+        const result = await sendTestPush();
+        toast(result.sent > 0 ? `Test sent to ${result.sent} device${result.sent === 1 ? '' : 's'}` : 'No device received it');
+      } catch (err) {
+        toast((err as Error).message, 'error');
+      }
+      test.removeAttribute('disabled');
+    };
+    fragment.append(el('div', { class: 'btn-row' }, test));
+
+    if (!isStandalone()) {
+      fragment.append(
+        el(
+          'div',
+          { class: 'status-line' },
+          'Tip: add DevTunnel to your Home Screen so notifications keep arriving with the browser closed.',
+        ),
+      );
+    }
+  }
+
+  return fragment;
+}
+
+function installInstructions(): HTMLElement {
+  const box = el('div', { class: 'push-install' });
+  box.append(el('div', { class: 'push-row-title' }, 'Add DevTunnel to your Home Screen first'));
+  box.append(
+    el(
+      'div',
+      { class: 'push-row-sub' },
+      'iOS only delivers notifications to an installed app, not to a Safari tab.',
+    ),
+  );
+  const steps = el('ol', { class: 'push-steps' });
+  for (const step of [
+    'Tap the Share button in Safari\u2019s toolbar.',
+    'Choose \u201CAdd to Home Screen\u201D.',
+    'Open DevTunnel from the new icon, then come back here and turn notifications on.',
+  ]) {
+    steps.append(el('li', {}, step));
+  }
+  box.append(steps);
+  return box;
+}
+
+// ---------------------------------------------------------------- presence
+
+/**
+ * Tells the server which session is in front of a human. It uses that to skip
+ * a "turn finished" push you would only be reading off the screen anyway.
+ */
+let presenceSessionId: string | null = null;
+
+function reportPresence(): void {
+  const wanted =
+    state.route.name === 'session' && document.visibilityState === 'visible' ? state.route.sessionId : null;
+  if (wanted === presenceSessionId) return;
+
+  if (presenceSessionId) sendQuiet({ t: 'presence', sessionId: presenceSessionId, visible: false });
+  if (wanted) sendQuiet({ t: 'presence', sessionId: wanted, visible: true });
+  presenceSessionId = wanted;
+}
+
+/** Presence is advisory, so a closed socket is not worth a "reconnecting" toast. */
+function sendQuiet(message: Record<string, unknown>): void {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+}
+
 // ------------------------------------------------------------- session view
 
 let streamEl: HTMLElement | null = null;
 /** blockId -> element, so streamed deltas land in the right bubble. */
 const blockNodes = new Map<string, HTMLElement>();
+/** blockId -> accumulated text, for progressive markdown rendering. */
+const streamingText = new Map<string, string>();
 
 function sessionView(): DocumentFragment {
   const session = state.sessions.get(state.route.sessionId);
   const fragment = document.createDocumentFragment();
   blockNodes.clear();
+  streamingText.clear();
 
   const actions: HTMLElement[] = [];
+  const refreshBtn = el(
+    'button',
+    { class: 'icon-btn', id: 'header-refresh', 'aria-label': 'Reload conversation', title: 'Reload conversation' },
+    '\u21BB',
+  );
+  refreshBtn.onclick = () => {
+    if (state.tab === 'git') {
+      void loadGit();
+      return;
+    }
+    refreshBtn.classList.add('spinning');
+    void loadTranscript(state.route.sessionId).finally(() => refreshBtn.classList.remove('spinning'));
+  };
+  actions.push(refreshBtn);
+
   if (session?.live) {
     const stopBtn = el('button', { class: 'icon-btn', id: 'header-stop', 'aria-label': 'Stop session', title: 'Stop session' }, '⏹');
     stopBtn.onclick = () => void stopSession();
@@ -493,7 +748,7 @@ function sessionView(): DocumentFragment {
     tab.onclick = () => {
       state.tab = id;
       render();
-      if (id === 'chat') subscribe(state.route.sessionId);
+      if (id === 'chat') void loadTranscript(state.route.sessionId);
       else void loadGit();
     };
     tabs.append(tab);
@@ -543,7 +798,7 @@ function deadSessionBar(session: SessionSummary): HTMLElement {
       const result = await api<{ session: SessionSummary }>(`/api/sessions/${session.id}/resume`, { method: 'POST' });
       state.sessions.set(result.session.id, result.session);
       render();
-      subscribe(session.id);
+      void loadTranscript(session.id);
       toast('Session reconnected');
     } catch (err) {
       toast((err as Error).message, 'error');
@@ -621,7 +876,11 @@ function updateSessionChrome(): void {
 
   // A session that died while being watched swaps the composer for a reconnect bar.
   const composerBar = document.querySelector('.composer');
-  if (composerBar && !session.live && document.getElementById('composer-input')) render();
+  if (composerBar && !session.live && document.getElementById('composer-input')) {
+    render();
+    // render() built an empty stream; put the transcript back into it.
+    void loadTranscript(session.id);
+  }
 }
 
 // --------------------------------------------------------------- event nodes
@@ -650,39 +909,54 @@ function renderEvent(event: SessionEvent): void {
 
   switch (event.type) {
     case 'turn_started': {
-      stream.append(el('div', { class: 'bubble user' }, text('text')));
+      const bubble = el('div', { class: 'bubble user' });
+      renderMarkdownInto(bubble, text('text'));
+      stream.append(bubble);
       break;
     }
 
-    case 'message_delta':
+    case 'message_delta': {
+      const blockId = text('blockId');
+      let node = blockNodes.get(blockId);
+      if (!node) {
+        node = el('div', { class: 'bubble assistant streaming' });
+        blockNodes.set(blockId, node);
+        stream.append(node);
+      }
+      const current = (streamingText.get(blockId) ?? '') + text('text');
+      streamingText.set(blockId, current);
+      renderMarkdownInto(node, current);
+      break;
+    }
+
     case 'thinking_delta': {
       const blockId = text('blockId');
       let node = blockNodes.get(blockId);
       if (!node) {
-        node =
-          event.type === 'message_delta'
-            ? el('div', { class: 'bubble assistant streaming' })
-            : thinkingBlock();
+        node = thinkingBlock();
         blockNodes.set(blockId, node);
         stream.append(node);
       }
-      const target = node.classList.contains('event') ? (node.querySelector('.body') as HTMLElement) : node;
-      target.append(document.createTextNode(text('text')));
+      const target = node.querySelector('.body') as HTMLElement | null;
+      if (target) target.append(document.createTextNode(text('text')));
       break;
     }
 
     case 'message': {
       const blockId = text('blockId');
+      const role = text('role') === 'user' ? 'user' : 'assistant';
       const existing = blockNodes.get(blockId);
       if (existing && !existing.classList.contains('event')) {
         // Replace streamed text with the authoritative final block.
-        existing.textContent = text('text');
+        renderMarkdownInto(existing, text('text'));
         existing.classList.remove('streaming');
       } else {
-        const node = el('div', { class: `bubble ${text('role') === 'user' ? 'user' : 'assistant'}` }, text('text'));
+        const node = el('div', { class: `bubble ${role}` });
+        renderMarkdownInto(node, text('text'));
         blockNodes.set(blockId, node);
         stream.append(node);
       }
+      streamingText.delete(blockId);
       break;
     }
 
@@ -742,7 +1016,10 @@ function renderEvent(event: SessionEvent): void {
     }
 
     case 'permission_resolved': {
-      resolvePermissionCard(text('requestId'), text('decision') as 'allow' | 'deny', text('decidedBy'));
+      const requestId = text('requestId');
+      resolvePermissionCard(requestId, text('decision') as 'allow' | 'deny', text('decidedBy'));
+      // The approval is answered; do not leave its notification on the lock screen.
+      void dismissNotification(`perm-${requestId}`);
       break;
     }
 
@@ -1022,21 +1299,86 @@ function renderDiff(diff: string): HTMLElement {
   return container;
 }
 
+// ------------------------------------------------------------------ clipboard
+
+document.addEventListener('click', (event) => {
+  const target = event.target as HTMLElement | null;
+  const copyBtn = target?.closest('.code-copy-btn') as HTMLButtonElement | null;
+  if (!copyBtn) return;
+  const codeBlock = copyBtn.closest('.code-block');
+  const codeEl = codeBlock?.querySelector('pre code');
+  const codeText = codeEl?.textContent ?? '';
+  if (!codeText) return;
+
+  const onCopied = () => {
+    copyBtn.textContent = 'Copied!';
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyBtn.textContent = 'Copy';
+      copyBtn.classList.remove('copied');
+    }, 2000);
+  };
+
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(codeText).then(onCopied).catch(() => {
+      fallbackCopy(codeText, onCopied);
+    });
+  } else {
+    fallbackCopy(codeText, onCopied);
+  }
+});
+
+function fallbackCopy(text: string, onSuccess: () => void): void {
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand('copy');
+    textarea.remove();
+    if (ok) onSuccess();
+    else toast('Failed to copy', 'error');
+  } catch {
+    toast('Failed to copy', 'error');
+  }
+}
+
 // ------------------------------------------------------------------ bootstrap
 
 parseRoute();
 render();
 connect();
 
+// Registers the service worker and re-syncs this device's push subscription.
+// A tapped notification arrives here as a navigate message from the worker.
+void initPush((url) => {
+  const hash = new URL(url, location.href).hash;
+  if (hash && hash !== location.hash) location.hash = hash;
+  else window.dispatchEvent(new HashChangeEvent('hashchange'));
+});
+
 // A phone aggressively suspends background tabs; reconnect as soon as it wakes.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && (!socket || socket.readyState !== WebSocket.OPEN)) {
+  if (document.visibilityState !== 'visible') {
+    reportPresence();
+    return;
+  }
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
     window.clearTimeout(reconnectTimer);
     reconnectDelay = 500;
     connect();
   }
+  // iOS suspends the tab hard enough that events can be missed without the
+  // socket ever reporting a close, so re-read the transcript on the way back in.
+  if (state.route.name === 'session' && state.tab === 'chat') {
+    void loadTranscript(state.route.sessionId);
+  }
+  reportPresence();
 });
 window.addEventListener('online', () => connect());
 window.setInterval(() => {
   if (socket?.readyState === WebSocket.OPEN) send({ t: 'ping' });
 }, 25_000);
+

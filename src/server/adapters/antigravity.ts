@@ -1,6 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { buildChildEnv } from './env.js';
+import { compactInput, safeStringify, summariseToolInput } from './summary.js';
+import { CommandApprovalBroker } from './command-broker.js';
 import { truncateText, type SessionEventBody } from '../sessions/events.js';
 import { normalizePermissionMode } from './types.js';
 import type {
@@ -54,11 +57,19 @@ const AGY_NATIVE_MODES = new Set([
 
 export class AntigravityAdapter implements CLIAdapter {
   readonly id = 'antigravity-cli';
+
   /**
-   * The Antigravity CLI runs unattended in headless stream-json mode with
-   * auto-approved permissions (--dangerously-skip-permissions).
+   * The CLI itself cannot ask: headless, it either auto-denies every tool or
+   * runs unattended. Approval therefore comes from the shell broker, which
+   * intercepts each `run_command` on its way to a shell. When the broker is off
+   * (permission mode "full") this session genuinely cannot prompt.
    */
-  readonly supportsPermissionPrompts = false;
+  get supportsPermissionPrompts(): boolean {
+    return this.broker !== null;
+  }
+
+  /** Null when the operator asked for unattended execution. */
+  private broker: CommandApprovalBroker | null = null;
 
   private child: ChildProcessWithoutNullStreams | null = null;
   private onEvent: AdapterEventHandler = () => {};
@@ -90,8 +101,6 @@ export class AntigravityAdapter implements CLIAdapter {
   private readonly accumulatedTextByStep = new Map<number, string>();
   /** step index -> accumulated thinking delta for stream-json agent_response steps. */
   private readonly accumulatedThinkingByStep = new Map<number, string>();
-  /** Permission requests the CLI is waiting on, keyed by its request id. */
-  private readonly pendingPermissions = new Map<string, { toolName: string; input: unknown }>();
   private lastErrorMessage: string | null = null;
   private exitPromise: Promise<void> | null = null;
   private resolveExit: (() => void) | null = null;
@@ -134,16 +143,15 @@ export class AntigravityAdapter implements CLIAdapter {
     ];
     if (this.options.model) args.push('--model', this.options.model);
 
-    const requested = this.options.permissionMode ?? 'default';
-    const normalized = normalizePermissionMode(requested);
-
-    if (requested === 'plan') {
-      args.push('--mode', 'plan', '--dangerously-skip-permissions');
-    } else if (normalized === 'acceptEdits' || requested === 'accept-edits' || requested === 'auto_edit') {
-      args.push('--mode', 'accept-edits', '--dangerously-skip-permissions');
-    } else {
-      args.push('--dangerously-skip-permissions');
-    }
+    // --mode is ignored in print mode ("not supported headless, continuing in
+    // the default mode"), so it is not passed at all.
+    //
+    // --dangerously-skip-permissions is always passed, and that is deliberate:
+    // without it the CLI runs in "request-review" mode, which headless means it
+    // auto-denies every tool and the turn fails. The flag stops the CLI from
+    // policing itself so that the broker can, with a human on the other end.
+    // With the broker off, it means what it says.
+    args.push('--dangerously-skip-permissions');
 
     if (this.options.resumeCliSessionId) {
       args.push('--conversation', this.options.resumeCliSessionId);
@@ -155,6 +163,8 @@ export class AntigravityAdapter implements CLIAdapter {
     if (this.child) throw new Error('session already started');
     this.setStatus('starting');
 
+    const inject = await this.startBroker();
+
     const child = spawn(this.command, this.buildArgs(), {
       cwd: this.options.cwd,
       env: buildChildEnv(process.env, {
@@ -162,6 +172,7 @@ export class AntigravityAdapter implements CLIAdapter {
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
+        inject,
       }),
       stdio: ['pipe', 'pipe', 'pipe'],
       // Own process group: killing the group also reaps whatever the CLI spawned.
@@ -219,6 +230,8 @@ export class AntigravityAdapter implements CLIAdapter {
         });
       }
       this.failPendingPermissions('the CLI process ended');
+      // Removes the shim directory and the socket; nothing can be approved now.
+      void this.broker?.stop('the CLI process ended');
       this.emit({
         type: 'session_finished',
         reason: this.terminating ? 'terminated' : clean ? 'exited' : 'crashed',
@@ -307,6 +320,9 @@ export class AntigravityAdapter implements CLIAdapter {
       clearTimeout(this.cancelTimer);
       this.cancelTimer = null;
     }
+    // Deny first: a shim blocked on approval would otherwise keep the process
+    // tree alive past the grace period and force a SIGKILL.
+    this.broker?.denyAll('the session was stopped');
 
     // Closing stdin is the CLI's standard shutdown path.
     try {
@@ -323,6 +339,7 @@ export class AntigravityAdapter implements CLIAdapter {
     await this.exitPromise;
     clearTimeout(killAfter);
     clearTimeout(hardKill);
+    await this.broker?.stop('the session was stopped');
     this.emit({ type: 'notice', message: `Session terminated (${reason}).` });
   }
 
@@ -446,12 +463,12 @@ export class AntigravityAdapter implements CLIAdapter {
       case 'result':
         this.translateResult(msg);
         return;
-      case 'control_request':
-        this.translateControlRequest(msg);
-        return;
       case 'error':
         this.translateError(msg);
         return;
+      // This CLI does not speak the control protocol at all; approval comes
+      // from the shell broker instead.
+      case 'control_request':
       case 'control_response':
       case 'rate_limit_event':
         return; // protocol chatter, not user-visible
@@ -461,74 +478,58 @@ export class AntigravityAdapter implements CLIAdapter {
   }
 
   /**
-   * The CLI asks permission by sending us a control_request; the turn blocks
-   * until we answer, so every request must end in exactly one response.
+   * Bring up the shell broker and hand back the environment overrides that put
+   * its shims in front of every real shell. Returns nothing to inject when the
+   * operator asked for unattended execution.
    */
-  private translateControlRequest(msg: Json): void {
-    const request = msg['request'];
-    const requestId = typeof msg['request_id'] === 'string' ? msg['request_id'] : null;
-    if (!requestId || !request || typeof request !== 'object') return;
-    const req = request as Json;
-    if (req['subtype'] !== 'can_use_tool') return;
+  private async startBroker(): Promise<Record<string, string> | undefined> {
+    if (normalizePermissionMode(this.options.permissionMode ?? 'default') === 'full') {
+      this.broker = null;
+      return undefined;
+    }
 
-    const toolName = String(req['tool_name'] ?? 'tool');
-    const input = req['input'] ?? req['parameters'];
-    this.pendingPermissions.set(requestId, { toolName, input });
-
-    const command =
-      input && typeof input === 'object'
-        ? ((input as Json)['CommandLine'] as string) ??
-          ((input as Json)['command'] as string) ??
-          ((input as Json)['cmd'] as string)
-        : undefined;
-
-    this.emit({
-      type: 'permission_request',
-      requestId,
-      toolName,
-      displayName: typeof req['display_name'] === 'string' ? (req['display_name'] as string) : toolName,
-      summary: summariseToolInput(toolName, input, 300),
-      command: typeof command === 'string' ? truncateText(command, 4000).text : undefined,
-      input: compactInput(input, this.options.limits.maxEventTextChars),
+    const broker = new CommandApprovalBroker({ cwd: this.options.cwd });
+    broker.handleRequest((request) => {
+      this.emit({
+        type: 'permission_request',
+        requestId: request.requestId,
+        toolName: 'run_command',
+        displayName: 'Shell command',
+        summary: summariseToolInput('run_command', { command: request.command }, 300),
+        command: truncateText(request.command, 4000).text,
+        input: { command: request.command, cwd: request.cwd },
+      });
     });
+
+    try {
+      await broker.start();
+    } catch (err) {
+      // Without the broker the only options are unattended or unusable, and
+      // silently choosing unattended is not acceptable for an approval feature.
+      await broker.stop().catch(() => {});
+      this.broker = null;
+      throw new Error(`Could not start the command approval broker: ${(err as Error).message}`);
+    }
+
+    this.broker = broker;
+    const binDir = broker.binDir;
+    if (!binDir) return undefined;
+    return { PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}` };
   }
 
   async respondToPermission(requestId: string, decision: PermissionDecision): Promise<void> {
-    const pending = this.pendingPermissions.get(requestId);
-    if (!pending) throw new Error('no such pending permission request');
-    const child = this.child;
-    if (!child || child.exitCode !== null) {
-      this.pendingPermissions.delete(requestId);
-      throw new Error('CLI process is not running');
-    }
-
-    const response =
-      decision.decision === 'allow'
-        ? { behavior: 'allow', updatedInput: pending.input }
-        : { behavior: 'deny', message: decision.reason || 'Denied by the user.' };
-
-    await this.write(
-      child,
-      JSON.stringify({
-        type: 'control_response',
-        response: { subtype: 'success', request_id: requestId, response },
-      }) + '\n',
-    );
-    this.pendingPermissions.delete(requestId);
+    const broker = this.broker;
+    if (!broker) throw new Error('this session cannot ask for approval');
+    const answered = broker.resolve(requestId, {
+      decision: decision.decision,
+      reason: decision.reason,
+    });
+    if (!answered) throw new Error('no such pending permission request');
   }
 
-  /** Deny anything still outstanding so the CLI is never left waiting. */
+  /** Release anything still blocked, so no shell is left waiting on a dead UI. */
   private failPendingPermissions(reason: string): void {
-    for (const requestId of [...this.pendingPermissions.keys()]) {
-      this.pendingPermissions.delete(requestId);
-      this.emit({
-        type: 'permission_resolved',
-        requestId,
-        decision: 'deny',
-        decidedBy: null,
-        reason,
-      });
-    }
+    this.broker?.denyAll(reason);
   }
 
   private translateInit(msg: Json): void {
@@ -942,56 +943,6 @@ function flattenContent(content: unknown): string {
       return '';
     })
     .join('\n');
-}
-
-function safeStringify(value: unknown, max = 4000): string {
-  try {
-    const out = JSON.stringify(value);
-    return out === undefined ? '' : out.slice(0, max);
-  } catch {
-    return '[unserialisable]';
-  }
-}
-
-/** Keep tool input small enough to stream to a phone. */
-function compactInput(input: unknown, max: number): unknown {
-  if (input == null || typeof input !== 'object') return input;
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(input as Json)) {
-    out[key] = typeof value === 'string' ? truncateText(value, Math.min(max, 4000)).text : value;
-  }
-  return out;
-}
-
-/** A one-line, human-readable description for the activity feed. */
-export function summariseToolInput(name: string, input: unknown, max: number): string {
-  if (!input || typeof input !== 'object') return name;
-  const i = input as Json;
-  const pick = (key: string): string | undefined =>
-    typeof i[key] === 'string' ? (i[key] as string) : undefined;
-
-  const candidate =
-    pick('CommandLine') ??
-    pick('command') ??
-    pick('cmd') ??
-    pick('file_path') ??
-    pick('absolute_path') ??
-    pick('AbsolutePath') ??
-    pick('TargetFile') ??
-    pick('path') ??
-    pick('pattern') ??
-    pick('Pattern') ??
-    pick('query') ??
-    pick('Query') ??
-    pick('url') ??
-    pick('Url') ??
-    pick('prompt') ??
-    pick('Prompt') ??
-    pick('description') ??
-    pick('Description');
-
-  const text = candidate ?? safeStringify(i, max);
-  return truncateText(text.replace(/\s+/g, ' ').trim(), max).text;
 }
 
 export function makeAntigravityFactory(command: string): CLIAdapterFactory {

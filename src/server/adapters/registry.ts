@@ -45,8 +45,10 @@ const DEFINITIONS: readonly AdapterDefinition[] = [
     displayName: 'Antigravity CLI',
     defaultCommand: 'agy',
     persistentProcess: true,
-    supportsPermissionPrompts: false,
-    note: 'One long-lived process per session. Runs non-interactively with auto-approved permissions.',
+    // The CLI has no approval channel of its own; DevTunnel brokers shell
+    // commands on its behalf, which covers command execution but not file edits.
+    supportsPermissionPrompts: true,
+    note: 'One long-lived process per session. Asks before running a shell command; its file edits are not gated.',
     build: makeAntigravityFactory,
   },
 ];

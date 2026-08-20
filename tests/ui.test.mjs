@@ -51,15 +51,21 @@ function mountClient(t, hash = '') {
   window.WebSocket.OPEN = 1;
 
   const fetchCalls = [];
+  // Transcript replays are served from here so a test can decide what history
+  // the server would hand back for /api/sessions/:id/events.
+  const history = { events: [], skipped: 0 };
   window.fetch = async (url, init) => {
     fetchCalls.push({ url, init });
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ session: { id: 'sess1', workspaceId: 'demo' } }),
-    };
+    const body = String(url).includes('/events')
+      ? { sessionId: 'sess1', lastSeq: history.events.at(-1)?.seq ?? 0, ...history }
+      : { session: { id: 'sess1', workspaceId: 'demo' } };
+    return { ok: true, status: 200, json: async () => body };
   };
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  // jsdom leaves this undefined; every real browser defines it, and http on
+  // loopback counts as secure. Without it the client reports the wrong reason
+  // for notifications being unavailable.
+  Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
 
   window.eval(fs.readFileSync(bundle, 'utf8'));
 
@@ -71,7 +77,7 @@ function mountClient(t, hash = '') {
     window.close();
   });
 
-  return { window, document: window.document, sockets, fetchCalls, socket: () => sockets.at(-1) };
+  return { window, document: window.document, sockets, fetchCalls, history, socket: () => sockets.at(-1) };
 }
 
 const welcome = {
@@ -586,4 +592,300 @@ test('history section clear all button calls clear-history endpoint', async (t) 
 
   const clearCall = ui.fetchCalls.find((c) => c.url.includes('/api/sessions/clear-history') && c.init?.method === 'POST');
   assert.ok(clearCall, 'POST clear-history request was sent');
+});
+
+// ----------------------------------------------------------- markdown bubbles
+
+test('user and assistant chat bubbles render rich markdown formatting', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  const userMarkdown = 'Please check `src/index.ts` and **fix the bugs**:\n- Bug 1\n- Bug 2';
+  const assistantMarkdown = `### Analysis Result
+Here is what I found in the file:
+> Important warning note
+
+| Function | Status |
+| --- | --- |
+| \`parse()\` | *Broken* |
+
+Link: [Docs](https://example.com/docs)
+`;
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 1, ts: 1, sessionId: 'sess1', type: 'turn_started', text: userMarkdown },
+      { seq: 2, ts: 2, sessionId: 'sess1', type: 'message', role: 'assistant', blockId: 'b_md_1', text: assistantMarkdown },
+    ],
+  });
+
+  const userBubble = ui.document.querySelector('.bubble.user');
+  assert.ok(userBubble, 'user bubble rendered');
+  assert.ok(userBubble.querySelector('code'), 'user inline code rendered');
+  assert.equal(userBubble.querySelector('code').textContent, 'src/index.ts');
+  assert.ok(userBubble.querySelector('strong'), 'user bold rendered');
+  assert.equal(userBubble.querySelector('strong').textContent, 'fix the bugs');
+  assert.ok(userBubble.querySelector('ul'), 'user list rendered');
+  assert.equal(userBubble.querySelectorAll('li').length, 2);
+
+  const assistantBubble = ui.document.querySelector('.bubble.assistant');
+  assert.ok(assistantBubble, 'assistant bubble rendered');
+  assert.ok(assistantBubble.querySelector('h3'), 'h3 heading rendered');
+  assert.equal(assistantBubble.querySelector('h3').textContent, 'Analysis Result');
+  assert.ok(assistantBubble.querySelector('blockquote'), 'blockquote rendered');
+  assert.match(assistantBubble.querySelector('blockquote').textContent, /Important warning note/);
+  assert.ok(assistantBubble.querySelector('table'), 'table rendered');
+  assert.equal(assistantBubble.querySelectorAll('th').length, 2);
+  assert.equal(assistantBubble.querySelectorAll('td').length, 2);
+
+  const link = assistantBubble.querySelector('a');
+  assert.ok(link, 'link rendered');
+  assert.equal(link.getAttribute('href'), 'https://example.com/docs');
+  assert.equal(link.getAttribute('target'), '_blank');
+  assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
+});
+
+test('code blocks render with language indicator and copy button', async (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  const codeSnippet = '```typescript\nconst message: string = "hello world";\nconsole.log(message);\n```';
+
+  let copiedText = '';
+  ui.window.navigator.clipboard = {
+    writeText: async (text) => {
+      copiedText = text;
+    },
+  };
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 1, ts: 1, sessionId: 'sess1', type: 'message', role: 'assistant', blockId: 'b_code_1', text: codeSnippet },
+    ],
+  });
+
+  const codeBlock = ui.document.querySelector('.bubble.assistant .code-block');
+  assert.ok(codeBlock, 'code block container rendered');
+
+  const langTag = codeBlock.querySelector('.code-lang');
+  assert.ok(langTag, 'language tag rendered');
+  assert.equal(langTag.textContent, 'typescript');
+
+  const codeEl = codeBlock.querySelector('pre code');
+  assert.ok(codeEl, 'code element rendered');
+  assert.match(codeEl.textContent, /const message: string/);
+
+  const copyBtn = codeBlock.querySelector('.code-copy-btn');
+  assert.ok(copyBtn, 'copy button rendered');
+  assert.equal(copyBtn.textContent, 'Copy');
+
+  copyBtn.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.match(copiedText, /const message: string = "hello world";/);
+  assert.equal(copyBtn.textContent, 'Copied!');
+  assert.ok(copyBtn.classList.contains('copied'));
+});
+
+test('streaming deltas progressively update markdown in assistant bubble', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 1, ts: 1, sessionId: 'sess1', type: 'message_delta', blockId: 'b_stream_md', text: 'Here is **bold' },
+    ],
+  });
+
+  const bubble = ui.document.querySelector('.bubble.assistant.streaming');
+  assert.ok(bubble, 'streaming bubble mounted');
+  assert.match(bubble.textContent, /Here is/);
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 2, ts: 2, sessionId: 'sess1', type: 'message_delta', blockId: 'b_stream_md', text: ' text** and `code`' },
+    ],
+  });
+
+  assert.ok(bubble.querySelector('strong'), 'progressive markdown bold element created');
+  assert.equal(bubble.querySelector('strong').textContent, 'bold text');
+  assert.ok(bubble.querySelector('code'), 'progressive markdown code element created');
+  assert.equal(bubble.querySelector('code').textContent, 'code');
+
+  // Final message replaces streaming
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 3, ts: 3, sessionId: 'sess1', type: 'message', role: 'assistant', blockId: 'b_stream_md', text: 'Here is **bold text** and `code` done.' },
+    ],
+  });
+
+  assert.equal(ui.document.querySelectorAll('.bubble.assistant.streaming').length, 0);
+  assert.equal(bubble.classList.contains('streaming'), false);
+  assert.match(bubble.textContent, /done\./);
+});
+
+test('markdown rendering sanitizes malicious scripts and XSS payloads', (t) => {
+  const ui = mountClient(t, '#/s/sess1');
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  const malicious = 'Hello <script>alert("xss")</script><img src=x onerror=alert(1)> [Click](javascript:alert("evil"))';
+
+  ui.socket().receive({
+    t: 'events',
+    sessionId: 'sess1',
+    events: [
+      { seq: 1, ts: 1, sessionId: 'sess1', type: 'turn_started', text: malicious },
+      { seq: 2, ts: 2, sessionId: 'sess1', type: 'message', role: 'assistant', blockId: 'b_sec', text: malicious },
+    ],
+  });
+
+  const userBubble = ui.document.querySelector('.bubble.user');
+  const assistantBubble = ui.document.querySelector('.bubble.assistant');
+
+  for (const b of [userBubble, assistantBubble]) {
+    assert.equal(b.querySelectorAll('script').length, 0, 'scripts are stripped');
+    const img = b.querySelector('img');
+    if (img) {
+      assert.equal(img.getAttribute('onerror'), null, 'inline error handlers are stripped');
+    }
+    const badLink = [...b.querySelectorAll('a')].find((a) => (a.getAttribute('href') || '').includes('javascript:'));
+    assert.equal(badLink, undefined, 'javascript: URIs are stripped');
+  }
+});
+
+
+// --------------------------------------------------------- notification setup
+
+/** Waits for the sheet's async status check to render into the panel. */
+async function openNotifications(document) {
+  document.getElementById('notifications-btn').click();
+  const sheet = document.querySelector('.sheet');
+  assert.ok(sheet, 'the bell opens the notifications sheet');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  return sheet;
+}
+
+test('the home screen offers notification settings', async (t) => {
+  const { window, document, socket } = mountClient(t);
+  socket().receive(welcome);
+
+  const sheet = await openNotifications(document);
+  assert.match(sheet.textContent, /approval/i, 'the sheet says what a notification is for');
+
+  // Nothing here may leave a phone stuck with a dead toggle.
+  assert.equal(sheet.querySelector('.push-body').textContent.trim().length > 0, true);
+  window.document.querySelector('.sheet').remove();
+});
+
+test('on an iPhone in Safari the sheet asks for a Home Screen install first', async (t) => {
+  const { window, document, socket } = mountClient(t);
+  socket().receive(welcome);
+
+  // iOS grants push only to an installed PWA, so the sheet must say so rather
+  // than showing a toggle that silently fails.
+  Object.defineProperty(window.navigator, 'userAgent', {
+    value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1',
+    configurable: true,
+  });
+
+  const sheet = await openNotifications(document);
+  assert.ok(sheet.querySelector('.push-install'), 'the install instructions are shown');
+  assert.match(sheet.textContent, /Add to Home Screen/i);
+  assert.equal(sheet.querySelector('.push-row'), null, 'no toggle is offered until it can work');
+});
+
+test('watching a session tells the server, so a finished turn does not double-notify', async (t) => {
+  const { document, socket } = mountClient(t, '#/s/sess1');
+  socket().open();
+  socket().receive(welcome);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const presence = socket().sent.filter((m) => m.t === 'presence');
+  assert.deepEqual(presence.at(-1), { t: 'presence', sessionId: 'sess1', visible: true });
+
+  document.location.hash = '#/';
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(
+    socket().sent.filter((m) => m.t === 'presence').at(-1),
+    { t: 'presence', sessionId: 'sess1', visible: false },
+  );
+});
+
+// ----------------------------------------------------------- transcript reload
+
+const transcript = [
+  { seq: 1, ts: 1, sessionId: 'sess1', type: 'turn_started', instructionId: 'i1', text: 'first question' },
+  { seq: 2, ts: 2, sessionId: 'sess1', type: 'message', role: 'assistant', blockId: 'b1', text: 'first answer' },
+];
+
+test('leaving a session and returning restores the conversation', async (t) => {
+  const { document, socket, history } = mountClient(t, '#/s/sess1');
+  history.events = transcript;
+  socket().open();
+  socket().receive(welcome);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(document.getElementById('stream').textContent, /first answer/);
+
+  // Go back to the list, then open the same session again. The old bug: the
+  // client remembered the last sequence it had drawn, so the server replayed
+  // nothing into the freshly-emptied stream and the chat appeared blank.
+  document.location.hash = '#/';
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  document.location.hash = '#/s/sess1';
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const stream = document.getElementById('stream');
+  assert.match(stream.textContent, /first question/, 'the instruction is back');
+  assert.match(stream.textContent, /first answer/, 'the reply is back');
+  // Restored once, not twice.
+  assert.equal(stream.textContent.match(/first answer/g).length, 1);
+});
+
+test('the reload control re-reads the transcript from the server', async (t) => {
+  const { document, socket, fetchCalls, history } = mountClient(t, '#/s/sess1');
+  history.events = transcript;
+  socket().open();
+  socket().receive(welcome);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const before = fetchCalls.filter((c) => String(c.url).includes('/events')).length;
+  document.getElementById('header-refresh').click();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const after = fetchCalls.filter((c) => String(c.url).includes('/events'));
+  assert.equal(after.length, before + 1, 'refresh re-fetches the history');
+  assert.match(after.at(-1).url, /since=0/, 'it reloads from the beginning');
+  assert.match(document.getElementById('stream').textContent, /first answer/);
+});
+
+test('a session that ends while being watched keeps its transcript on screen', async (t) => {
+  const { document, socket, history } = mountClient(t, '#/s/sess1');
+  history.events = transcript;
+  socket().open();
+  socket().receive(welcome);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(document.getElementById('stream').textContent, /first answer/);
+
+  // The composer is swapped for the reconnect bar, which re-renders the view.
+  socket().receive({
+    t: 'session',
+    session: { ...welcome.sessions[0], state: 'exited', live: false, resumable: true },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.match(document.getElementById('stream').textContent, /first answer/, 'history survived the re-render');
 });

@@ -228,6 +228,7 @@ async function loadTranscript(sessionId: string): Promise<void> {
     }
     for (const event of history.events) renderEvent(event);
     scrollToBottom(true);
+    if (highlightRequestId) focusPermissionCard(highlightRequestId);
   } catch {
     // Offline, or the session is gone. The socket replay is the fallback.
     state.lastSeq.set(sessionId, 0);
@@ -620,6 +621,19 @@ function notificationPanel(status: PushStatus, refresh: () => Promise<void>): Do
   fragment.append(row);
 
   if (status.subscribed) {
+    // Whether Approve/Deny appear on the notification itself is a platform
+    // decision, so state which one this device made rather than leave the user
+    // wondering if something is broken.
+    fragment.append(
+      el(
+        'div',
+        { class: 'push-row-sub' },
+        status.maxActions >= 2
+          ? 'Approval notifications carry Approve and Deny buttons.'
+          : 'This device does not support buttons on notifications, so an approval opens straight to its card instead.',
+      ),
+    );
+
     const test = el('button', { class: 'btn' }, 'Send a test notification');
     test.onclick = async () => {
       test.setAttribute('disabled', 'true');
@@ -1012,6 +1026,7 @@ function renderEvent(event: SessionEvent): void {
 
     case 'permission_request': {
       stream.append(permissionCard(event));
+      if (highlightRequestId === text('requestId')) focusPermissionCard(highlightRequestId);
       break;
     }
 
@@ -1118,6 +1133,27 @@ function permissionCard(event: SessionEvent): HTMLElement {
   actions.append(deny, allow);
   card.append(actions);
   return card;
+}
+
+/** Which approval the user tapped in a notification, until it is on screen. */
+let highlightRequestId: string | null = null;
+
+/**
+ * Bring the tapped approval into view. On platforms that draw no action buttons
+ * on a notification — Safari and iOS — this is the whole answer: one tap lands
+ * on the card with Approve and Deny already under the thumb.
+ */
+function focusPermissionCard(requestId: string): void {
+  const card = document.getElementById(`perm-${requestId}`);
+  if (!card) {
+    // The transcript may still be loading; try again when it has.
+    highlightRequestId = requestId;
+    return;
+  }
+  highlightRequestId = null;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.add('highlighted');
+  setTimeout(() => card.classList.remove('highlighted'), 2600);
 }
 
 function resolvePermissionCard(requestId: string, decision: 'allow' | 'deny', decidedBy: string): void {
@@ -1353,11 +1389,24 @@ connect();
 
 // Registers the service worker and re-syncs this device's push subscription.
 // A tapped notification arrives here as a navigate message from the worker.
-void initPush((url) => {
+void initPush((url, requestId) => {
+  if (requestId) highlightRequestId = requestId;
   const hash = new URL(url, location.href).hash;
   if (hash && hash !== location.hash) location.hash = hash;
-  else window.dispatchEvent(new HashChangeEvent('hashchange'));
+  else {
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    if (requestId) focusPermissionCard(requestId);
+  }
 });
+
+// A cold start from a notification tap carries the approval id in the query
+// string, because the service worker cannot address the hash router directly.
+const launchPerm = new URLSearchParams(location.search).get('perm');
+if (launchPerm) {
+  highlightRequestId = launchPerm;
+  // Drop it from the URL so a reload does not re-trigger the jump.
+  history.replaceState(null, '', location.pathname + location.hash);
+}
 
 // A phone aggressively suspends background tabs; reconnect as soon as it wakes.
 document.addEventListener('visibilitychange', () => {

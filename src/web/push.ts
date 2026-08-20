@@ -25,6 +25,12 @@ export type PushStatus = {
   devices: number;
   mine: number;
   detail: string;
+  /**
+   * How many action buttons this platform will draw on a notification. Safari,
+   * including iOS, reports 0 and silently ignores the buttons, so Approve/Deny
+   * can only be offered where this is at least 2.
+   */
+  maxActions: number;
 };
 
 type PushConfig = { enabled: boolean; publicKey: string | null; devices: number; mine: number };
@@ -65,6 +71,12 @@ export function isStandalone(): boolean {
 function permission(): NotificationPermission {
   if (typeof Notification === 'undefined') return 'default';
   return Notification.permission;
+}
+
+/** 0 on Safari/iOS: it accepts the `actions` array and draws none of it. */
+function maxActions(): number {
+  if (typeof Notification === 'undefined') return 0;
+  return (Notification as unknown as { maxActions?: number }).maxActions ?? 0;
 }
 
 function remembered(): boolean {
@@ -114,7 +126,7 @@ async function currentSubscription(): Promise<PushSubscription | null> {
 }
 
 export async function pushStatus(): Promise<PushStatus> {
-  const base = { permission: permission(), subscribed: false, devices: 0, mine: 0 };
+  const base = { permission: permission(), subscribed: false, devices: 0, mine: 0, maxActions: maxActions() };
 
   if (typeof window !== 'undefined' && !window.isSecureContext) {
     return {
@@ -167,6 +179,7 @@ export async function pushStatus(): Promise<PushStatus> {
     subscribed: Boolean(subscription) && remembered(),
     devices: config.devices,
     mine: config.mine,
+    maxActions: maxActions(),
     detail:
       permission() === 'denied'
         ? 'Notifications are blocked for this app. Re-allow them in your device settings, then try again.'
@@ -236,12 +249,14 @@ export async function sendTestPush(): Promise<{ sent: number; failed: number }> 
  * server holds. A subscription can survive on the device while the server's
  * copy is gone — after clearing state, say — and the user would never know.
  */
-export async function initPush(onNavigate: (url: string) => void): Promise<void> {
+export async function initPush(onNavigate: (url: string, requestId?: string) => void): Promise<void> {
   if (!pushApiSupported()) return;
 
   navigator.serviceWorker.addEventListener('message', (event: MessageEvent) => {
-    const data = event.data as { type?: string; url?: string } | null;
-    if (data?.type === 'navigate' && typeof data.url === 'string') onNavigate(data.url);
+    const data = event.data as { type?: string; url?: string; requestId?: string } | null;
+    if (data?.type === 'navigate' && typeof data.url === 'string') {
+      onNavigate(data.url, typeof data.requestId === 'string' ? data.requestId : undefined);
+    }
   });
 
   const reg = await ensureRegistration();

@@ -113,6 +113,21 @@ normal tab, though installing still helps the notifications survive a closed bro
 If the sheet refuses to show a toggle it will say why — not installed yet, served
 over plain `http`, permission blocked in system settings, or push disabled server-side.
 
+### Answering from the notification
+
+An approval notification carries **Approve** and **Deny** buttons where the
+platform draws them — Android, and desktop Chrome/Edge/Firefox. Pressing one
+answers through the same REST endpoint the in-app buttons use, so the decision
+is validated, attributed and logged identically, and the app never has to open.
+If it cannot be answered (already resolved, timed out, server unreachable) you
+get a follow-up notification saying so rather than silence.
+
+**Safari, including iOS, does not draw buttons on web push notifications**
+(`Notification.maxActions` is 0 there, and the buttons are ignored). So on an
+iPhone a tap instead opens the app directly on that approval's card, scrolled to
+and highlighted, with Approve and Deny under your thumb. The 🔔 sheet tells you
+which of the two behaviours your device has, so you are not left guessing.
+
 ### What it costs you
 
 Delivery goes through Apple's, Google's or Mozilla's push service, so this is the
@@ -209,7 +224,7 @@ Open the HTTPS URL on Safari or Chrome on your phone (connected to your tailnet)
 - **Add to Home Screen**: Tap **Share → Add to Home Screen** for a full-screen, standalone app.
 - **Home Screen**: Lists registered workspaces, active sessions, and history.
 - **Start / Reattach**: Tap a workspace to start a new session or reopen an ongoing one.
-- **Approvals**: When an agent wants to run a shell command or another risky action, an **Approve / Deny** prompt appears with the exact command. Nothing runs until you answer, and an unanswered request is denied after `PERMISSION_TIMEOUT_MS`.
+- **Approvals**: When an agent wants to run a shell command or another risky action, an **Approve / Deny** prompt appears with the exact command. Nothing runs until you answer, and an unanswered request is denied after `PERMISSION_TIMEOUT_MS`. Approvals can also be answered from the notification itself — see below.
 - **Reload**: The ↻ button in the session header re-reads the whole transcript from the server.
 - **Controls**: Send instructions via the composer. Tap ■ to cancel a running task without losing context.
 - **Git Inspector**: View branch, modified files, and line-by-line diffs.

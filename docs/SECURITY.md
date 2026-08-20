@@ -193,8 +193,16 @@ only a tailnet user who can already drive your sessions can add one. Endpoints
 are dropped automatically on `404`/`410` (the browser discarded the
 subscription) or after `PUSH_MAX_FAILURES` consecutive delivery errors.
 
-The service worker only ever calls `showNotification`; it caches nothing and
-intercepts no requests, so it cannot serve a stale bundle or observe traffic.
+The service worker caches nothing and intercepts no requests, so it cannot serve
+a stale bundle or observe traffic. It does one privileged thing: an approval
+notification carries Approve/Deny buttons, and pressing one POSTs to the same
+`/api/sessions/:id/permissions/:requestId` route the in-app buttons use. That
+route still authorizes the request, still validates the id against the session's
+pending set, and still records who decided — answering from the shade is not a
+bypass, only a shortcut. The session id and request id come from the encrypted
+payload, so the push service cannot see or forge them; and because a device only
+receives pushes after subscribing through an authorized request, holding the
+notification already implies holding the session.
 
 ## Browser-side hardening
 

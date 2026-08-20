@@ -1153,3 +1153,25 @@ button {
     opacity: 0.5;
   }
 }
+
+/* Arriving from a notification tap: say which approval was meant. */
+.permission.highlighted {
+  animation: permission-flash 2.6s ease-out;
+}
+
+@keyframes permission-flash {
+  0%,
+  40% {
+    box-shadow: 0 0 0 2px var(--busy);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .permission.highlighted {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--busy);
+  }
+}

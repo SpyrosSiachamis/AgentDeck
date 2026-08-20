@@ -1,4 +1,4 @@
-# DevTunnel
+# AgentDeck
 
 A mobile-first remote development console. It runs on your development machine,
 keeps AI coding CLI sessions alive in the background, and is reachable from your

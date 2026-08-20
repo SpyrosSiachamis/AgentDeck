@@ -191,6 +191,36 @@ button {
   margin-top: 4px;
 }
 
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 18px 4px 8px;
+}
+
+.section-header:first-child {
+  margin-top: 4px;
+}
+
+.section-header .section-title {
+  margin: 0;
+}
+
+.section-action {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+}
+
+.section-action:hover,
+.section-action:active {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
 .card {
   display: block;
   width: 100%;
@@ -223,6 +253,26 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.card-delete-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--text-faint);
+  font-size: 13px;
+  flex: 0 0 auto;
+  opacity: 0.65;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.card-delete-btn:hover,
+.card-delete-btn:active {
+  opacity: 1;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
 }
 
 .card-meta {

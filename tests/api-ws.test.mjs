@@ -349,3 +349,53 @@ test('there is no shell or filesystem endpoint', async (t) => {
     assert.equal(res.statusCode, 404);
   }
 });
+
+test('session can be stopped via POST /api/sessions/:id/stop and retains history', async (t) => {
+  const h = await buildHarness();
+  t.after(() => h.close());
+
+  const created = await h.app.inject({ method: 'POST', url: '/api/sessions', payload: { workspaceId: 'repo' } });
+  const sessionId = created.json().session.id;
+
+  const stopRes = await h.app.inject({ method: 'POST', url: `/api/sessions/${sessionId}/stop` });
+  assert.equal(stopRes.statusCode, 200);
+
+  const getRes = await h.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}` });
+  assert.equal(getRes.statusCode, 200);
+  assert.equal(getRes.json().session.live, false);
+});
+
+test('session can be deleted via DELETE /api/sessions/:id, removing memory and disk state', async (t) => {
+  const h = await buildHarness();
+  t.after(() => h.close());
+
+  const created = await h.app.inject({ method: 'POST', url: '/api/sessions', payload: { workspaceId: 'repo' } });
+  const sessionId = created.json().session.id;
+
+  const delRes = await h.app.inject({ method: 'DELETE', url: `/api/sessions/${sessionId}` });
+  assert.equal(delRes.statusCode, 200);
+  assert.equal(delRes.json().deleted, sessionId);
+
+  const getRes = await h.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}` });
+  assert.equal(getRes.statusCode, 404);
+});
+
+test('history can be cleared via POST /api/sessions/clear-history', async (t) => {
+  const h = await buildHarness();
+  t.after(() => h.close());
+
+  const live = await h.sessions.create({ workspaceId: 'repo', createdBy: null });
+  const stopped1 = await h.sessions.create({ workspaceId: 'repo', createdBy: null });
+  await stopped1.terminate('stopped');
+  const stopped2 = await h.sessions.create({ workspaceId: 'repo', createdBy: null });
+  await stopped2.terminate('stopped');
+
+  const clearRes = await h.app.inject({ method: 'POST', url: '/api/sessions/clear-history' });
+  assert.equal(clearRes.statusCode, 200);
+  assert.equal(clearRes.json().cleared, 2);
+
+  const listRes = await h.app.inject({ method: 'GET', url: '/api/sessions' });
+  const remaining = listRes.json().sessions;
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].id, live.id);
+});

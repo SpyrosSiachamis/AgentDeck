@@ -161,6 +161,17 @@ async function runTurn(text) {
     for (let i = 0; i < 64; i++) assistantText(chunk);
   }
 
+  if (text.includes('FAIL_JSON')) {
+    emit({
+      type: 'result',
+      status: 'ERROR',
+      is_error: true,
+      error: 'invalid model selection (--model "claude-sonnet-5"): model is not recognized',
+    });
+    setTimeout(() => process.exit(1), 10);
+    return;
+  }
+
   if (text.includes('FAIL')) {
     process.stderr.write('Antigravity CLI failed with error.\n');
     process.exit(41);

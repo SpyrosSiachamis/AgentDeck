@@ -228,3 +228,66 @@ test('approvals travel over the websocket', async (t) => {
     label: 'invalid decision rejected',
   });
 });
+
+test('workspace model for default agent is not applied to a different agent unless configured', async (t) => {
+  const h = await buildHarness();
+  t.after(() => h.close());
+
+  // A workspace with a model for the default agent (claude-code)
+  const wsWithClaude = {
+    id: 'claude-ws',
+    name: 'Claude WS',
+    path: h.repo,
+    enabled: true,
+    model: 'claude-sonnet-5',
+    isGitRepo: true,
+  };
+  h.workspaces.byId.set('claude-ws', wsWithClaude);
+
+  // When starting claude-code in that workspace, it gets claude-sonnet-5
+  const claudeSession = await h.sessions.create({ workspaceId: 'claude-ws', adapterId: 'claude-code', createdBy: null });
+  assert.equal(claudeSession.summary().model, 'claude-sonnet-5');
+
+  // When starting antigravity-cli in that workspace, it does not inherit claude-sonnet-5
+  const agySession = await h.sessions.create({ workspaceId: 'claude-ws', adapterId: 'antigravity-cli', createdBy: null });
+  assert.equal(agySession.summary().model, 'fake-agy-1');
+
+  // When models is configured per-agent on the workspace, each gets its respective model
+  const wsWithBoth = {
+    id: 'both-ws',
+    name: 'Both WS',
+    path: h.repo,
+    enabled: true,
+    models: {
+      'claude-code': 'claude-opus-4',
+      'antigravity-cli': 'gemini-3.7-flash',
+    },
+    isGitRepo: true,
+  };
+  h.workspaces.byId.set('both-ws', wsWithBoth);
+
+  const claudeBoth = await h.sessions.create({ workspaceId: 'both-ws', adapterId: 'claude-code', createdBy: null });
+  assert.equal(claudeBoth.summary().model, 'claude-opus-4');
+
+  const agyBoth = await h.sessions.create({ workspaceId: 'both-ws', adapterId: 'antigravity-cli', createdBy: null });
+  assert.equal(agyBoth.summary().model, 'gemini-3.7-flash');
+});
+
+test('CLI stdout JSON errors are captured and reported in error event and exit detail', async (t) => {
+  const h = await buildHarness();
+  t.after(() => h.close());
+
+  const session = await h.sessions.create({ workspaceId: 'repo', adapterId: 'antigravity-cli', createdBy: null });
+  const sink = collectEvents(session);
+  await waitFor(() => sink.types().includes('session_started'));
+
+  await session.instruct('FAIL_JSON please stop', null);
+  await waitFor(() => session.summary().state === 'crashed', { label: 'crashed after stdout error' });
+
+  const errorEvents = sink.events.filter((e) => e.type === 'error');
+  assert.ok(errorEvents.length > 0, 'error events were emitted');
+  assert.ok(
+    errorEvents.some((e) => String(e.message).includes('invalid model selection') || String(e.detail).includes('invalid model selection')),
+    'the error message from CLI stdout JSON is captured in the error events',
+  );
+});

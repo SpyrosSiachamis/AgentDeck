@@ -330,7 +330,12 @@ function homeView(): DocumentFragment {
   for (const session of active) scroll.append(sessionCard(session));
 
   if (past.length > 0) {
-    scroll.append(el('div', { class: 'section-title' }, 'History'));
+    const header = el('div', { class: 'section-header' });
+    header.append(el('span', { class: 'section-title' }, `History (${past.length})`));
+    const clearBtn = el('button', { class: 'section-action', 'aria-label': 'Clear all history' }, 'Clear all');
+    clearBtn.onclick = () => void clearAllHistory();
+    header.append(clearBtn);
+    scroll.append(header);
     for (const session of past) scroll.append(sessionCard(session));
   }
 
@@ -339,18 +344,31 @@ function homeView(): DocumentFragment {
 }
 
 function sessionCard(session: SessionSummary): HTMLElement {
-  const card = el('button', { class: 'card' });
-  card.append(
-    el(
-      'div',
-      { class: 'card-row' },
-      el('span', { class: 'card-title' }, session.title),
-      ...(session.pendingPermissions?.length
-        ? [el('span', { class: 'badge needs-approval' }, 'approval needed')]
-        : []),
-      el('span', { class: 'badge', 'data-state': session.state }, session.state),
-    ),
+  const card = el('div', { class: 'card', role: 'button', tabindex: '0' });
+  const row = el(
+    'div',
+    { class: 'card-row' },
+    el('span', { class: 'card-title' }, session.title),
+    ...(session.pendingPermissions?.length
+      ? [el('span', { class: 'badge needs-approval' }, 'approval needed')]
+      : []),
+    el('span', { class: 'badge', 'data-state': session.state }, session.state),
   );
+
+  if (!session.live) {
+    const delBtn = el(
+      'button',
+      { class: 'card-delete-btn', 'aria-label': 'Delete conversation', title: 'Delete conversation' },
+      '🗑',
+    );
+    delBtn.onclick = (event) => {
+      event.stopPropagation();
+      void deleteSession(session.id);
+    };
+    row.append(delBtn);
+  }
+
+  card.append(row);
   card.append(
     el(
       'div',
@@ -360,7 +378,17 @@ function sessionCard(session: SessionSummary): HTMLElement {
       el('span', {}, relativeTime(session.updatedAt)),
     ),
   );
-  card.onclick = () => navigate(`/s/${session.id}`);
+  card.onclick = (event) => {
+    if ((event.target as HTMLElement).closest('.card-delete-btn')) return;
+    navigate(`/s/${session.id}`);
+  };
+  card.onkeydown = (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      if ((event.target as HTMLElement).closest('.card-delete-btn')) return;
+      event.preventDefault();
+      navigate(`/s/${session.id}`);
+    }
+  };
   return card;
 }
 
@@ -438,13 +466,21 @@ function sessionView(): DocumentFragment {
   const fragment = document.createDocumentFragment();
   blockNodes.clear();
 
-  const stopBtn = el('button', { class: 'icon-btn', id: 'header-stop', 'aria-label': 'Stop session' }, '⏹');
-  stopBtn.onclick = () => void stopSession();
+  const actions: HTMLElement[] = [];
+  if (session?.live) {
+    const stopBtn = el('button', { class: 'icon-btn', id: 'header-stop', 'aria-label': 'Stop session', title: 'Stop session' }, '⏹');
+    stopBtn.onclick = () => void stopSession();
+    actions.push(stopBtn);
+  } else if (session) {
+    const delBtn = el('button', { class: 'icon-btn', id: 'header-delete', 'aria-label': 'Delete conversation', title: 'Delete conversation' }, '🗑');
+    delBtn.onclick = () => void deleteSession(session.id);
+    actions.push(delBtn);
+  }
 
   fragment.append(
     topbar(session?.title ?? 'Session', session ? `${session.workspaceName} · ${session.adapterName} · ${session.state}` : undefined, {
       back: true,
-      actions: [stopBtn],
+      actions,
     }),
   );
 
@@ -497,6 +533,9 @@ function deadSessionBar(session: SessionSummary): HTMLElement {
   );
   info.style.flex = '1';
 
+  const del = el('button', { class: 'btn danger' }, 'Delete');
+  del.onclick = () => void deleteSession(session.id);
+
   const resume = el('button', { class: 'btn primary' }, 'Reconnect');
   resume.onclick = async () => {
     resume.setAttribute('disabled', 'true');
@@ -512,7 +551,7 @@ function deadSessionBar(session: SessionSummary): HTMLElement {
     }
   };
 
-  bar.append(info, resume);
+  bar.append(info, del, resume);
   return bar;
 }
 
@@ -825,8 +864,46 @@ async function stopSession(): Promise<void> {
   const session = state.sessions.get(state.route.sessionId);
   if (!session?.live) return;
   try {
-    await api(`/api/sessions/${session.id}`, { method: 'DELETE' });
+    await api(`/api/sessions/${session.id}/stop`, { method: 'POST' });
     toast('Session stopped');
+  } catch (err) {
+    toast((err as Error).message, 'error');
+  }
+}
+
+async function deleteSession(sessionId: string): Promise<void> {
+  if (!window.confirm('Delete this conversation history?')) return;
+  try {
+    await api(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+    state.sessions.delete(sessionId);
+    state.lastSeq.delete(sessionId);
+    if (state.route.name === 'session' && state.route.sessionId === sessionId) {
+      navigate('/');
+    } else {
+      render();
+    }
+    toast('Conversation deleted');
+  } catch (err) {
+    toast((err as Error).message, 'error');
+  }
+}
+
+async function clearAllHistory(): Promise<void> {
+  if (!window.confirm('Delete all conversation history?')) return;
+  try {
+    await api('/api/sessions/clear-history', { method: 'POST' });
+    for (const [id, s] of state.sessions) {
+      if (!s.live) {
+        state.sessions.delete(id);
+        state.lastSeq.delete(id);
+      }
+    }
+    if (state.route.name === 'session' && !state.sessions.has(state.route.sessionId)) {
+      navigate('/');
+    } else {
+      render();
+    }
+    toast('History cleared');
   } catch (err) {
     toast((err as Error).message, 'error');
   }

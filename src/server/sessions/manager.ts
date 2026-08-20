@@ -94,6 +94,28 @@ export class SessionManager {
     const factory = this.adapters.factory(adapterId);
     if (!factory) throw new AdapterError(`Unknown agent: ${adapterId}`, 'unknown_adapter');
 
+    const resolveModel = (): string | null => {
+      if (restored?.model !== undefined) return restored.model;
+      if (fresh?.model) return fresh.model;
+      if (workspace.models?.[adapterId]) return workspace.models[adapterId] ?? null;
+      const matchesAdapter = workspace.adapterId
+        ? workspace.adapterId === adapterId
+        : adapterId === this.adapters.defaultId();
+      if (matchesAdapter && workspace.model) return workspace.model;
+      return this.adapters.modelFor(adapterId);
+    };
+
+    const resolvePermissionMode = (): string | null => {
+      if (restored?.permissionMode !== undefined) return restored.permissionMode;
+      if (fresh?.permissionMode) return fresh.permissionMode;
+      if (workspace.permissionModes?.[adapterId]) return workspace.permissionModes[adapterId] ?? null;
+      const matchesAdapter = workspace.adapterId
+        ? workspace.adapterId === adapterId
+        : adapterId === this.adapters.defaultId();
+      if (matchesAdapter && workspace.permissionMode) return workspace.permissionMode;
+      return this.config.cliPermissionMode;
+    };
+
     const session = new Session(
       id,
       workspace,
@@ -108,16 +130,8 @@ export class SessionManager {
         title: restored?.title ?? fresh?.title ?? DEFAULT_TITLE,
         createdAt: restored?.createdAt ?? Date.now(),
         createdBy: restored?.createdBy ?? fresh?.createdBy ?? null,
-        model:
-          restored?.model ??
-          fresh?.model ??
-          workspace.model ??
-          this.adapters.modelFor(adapterId),
-        permissionMode:
-          restored?.permissionMode ??
-          fresh?.permissionMode ??
-          workspace.permissionMode ??
-          this.config.cliPermissionMode,
+        model: resolveModel(),
+        permissionMode: resolvePermissionMode(),
       },
       restored,
       restoredSeqFloor,
@@ -223,6 +237,21 @@ export class SessionManager {
     await session.flushPersist();
     this.sessions.delete(id);
     await this.store.remove(id).catch(() => {});
+    this.log.info({ sessionId: id }, 'session removed');
+  }
+
+  async clearHistory(): Promise<number> {
+    const dead = [...this.sessions.values()].filter((s) => !s.live);
+    for (const session of dead) {
+      await session.terminate('deleted');
+      await session.flushPersist();
+      this.sessions.delete(session.id);
+      await this.store.remove(session.id).catch(() => {});
+    }
+    if (dead.length > 0) {
+      this.log.info({ cleared: dead.length }, 'history cleared');
+    }
+    return dead.length;
   }
 
   /** Periodic housekeeping: turn timeouts, idle timeouts, dead-session eviction. */

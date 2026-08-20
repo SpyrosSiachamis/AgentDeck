@@ -81,6 +81,7 @@ export class ClaudeCodeAdapter implements CLIAdapter {
   private readonly blockIndexByMessage = new Map<string, number>();
   /** Permission requests the CLI is waiting on, keyed by its request id. */
   private readonly pendingPermissions = new Map<string, { toolName: string; input: unknown }>();
+  private lastErrorMessage: string | null = null;
   private exitPromise: Promise<void> | null = null;
   private resolveExit: (() => void) | null = null;
 
@@ -203,7 +204,7 @@ export class ClaudeCodeAdapter implements CLIAdapter {
         this.emit({
           type: 'error',
           message: `CLI process exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
-          detail: this.stderrBuffer.slice(-2000) || undefined,
+          detail: this.stderrBuffer.slice(-2000) || this.lastErrorMessage || undefined,
           fatal: true,
         });
       }
@@ -220,8 +221,8 @@ export class ClaudeCodeAdapter implements CLIAdapter {
     // A spawn failure surfaces asynchronously; give it a tick so obvious
     // misconfiguration (missing binary) fails fast at start time.
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    if (this.status === 'crashed') throw new Error('CLI process failed to start');
-    this.setStatus('idle');
+    if (this.status === 'crashed') throw new Error(this.lastErrorMessage || 'CLI process failed to start');
+    if (this.status === 'starting') this.setStatus('idle');
   }
 
   async sendInstruction(text: string): Promise<void> {
@@ -633,10 +634,24 @@ export class ClaudeCodeAdapter implements CLIAdapter {
       this.emit({ type: 'session_cancelled', reason: 'interrupted by user' });
     }
 
+    const isError = msg['is_error'] === true || (subtype !== 'success' && !cancelled);
+    if (isError) {
+      const errorMsg =
+        (typeof msg['error'] === 'string' && msg['error']) ||
+        (typeof msg['result'] === 'string' && msg['result']) ||
+        'The Claude CLI reported an error';
+      this.lastErrorMessage = errorMsg;
+      this.emit({
+        type: 'error',
+        message: errorMsg,
+        fatal: false,
+      });
+    }
+
     const result = typeof msg['result'] === 'string' ? truncateText(msg['result'], 2000).text : undefined;
     this.emit({
       type: 'turn_finished',
-      isError: msg['is_error'] === true || (subtype !== 'success' && !cancelled),
+      isError,
       durationMs: numberOrUndefined(msg['duration_ms']),
       costUsd: numberOrUndefined(msg['total_cost_usd']),
       numTurns: numberOrUndefined(msg['num_turns']),

@@ -217,12 +217,32 @@ export async function buildServer(deps: AppDeps) {
     return { session: session.summary() };
   });
 
-  app.delete('/api/sessions/:id', async (req) => {
+  app.post('/api/sessions/:id/stop', async (req) => {
     const { id } = req.params as { id: string };
     sessions.requireAuthorized(id);
     await sessions.terminate(id, `stopped by ${identityLabel(req.identity)}`);
     hub.broadcastSessions();
     return { ok: true };
+  });
+
+  app.post('/api/sessions/clear-history', async () => {
+    const cleared = await sessions.clearHistory();
+    hub.broadcastSessions();
+    return { ok: true, cleared };
+  });
+
+  app.delete('/api/sessions', async () => {
+    const cleared = await sessions.clearHistory();
+    hub.broadcastSessions();
+    return { ok: true, cleared };
+  });
+
+  app.delete('/api/sessions/:id', async (req) => {
+    const { id } = req.params as { id: string };
+    sessions.requireAuthorized(id);
+    await sessions.remove(id);
+    hub.broadcastSessions();
+    return { ok: true, deleted: id };
   });
 
   app.get('/api/workspaces/:id/git/status', async (req) => {

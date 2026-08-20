@@ -92,6 +92,7 @@ export class AntigravityAdapter implements CLIAdapter {
   private readonly accumulatedThinkingByStep = new Map<number, string>();
   /** Permission requests the CLI is waiting on, keyed by its request id. */
   private readonly pendingPermissions = new Map<string, { toolName: string; input: unknown }>();
+  private lastErrorMessage: string | null = null;
   private exitPromise: Promise<void> | null = null;
   private resolveExit: (() => void) | null = null;
 
@@ -213,7 +214,7 @@ export class AntigravityAdapter implements CLIAdapter {
         this.emit({
           type: 'error',
           message: `CLI process exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
-          detail: this.stderrBuffer.slice(-2000) || undefined,
+          detail: this.stderrBuffer.slice(-2000) || this.lastErrorMessage || undefined,
           fatal: true,
         });
       }
@@ -229,8 +230,8 @@ export class AntigravityAdapter implements CLIAdapter {
 
     // A spawn failure surfaces asynchronously; give it a tick so missing binary fails fast.
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    if (this.status === 'crashed') throw new Error('CLI process failed to start');
-    this.setStatus('idle');
+    if (this.status === 'crashed') throw new Error(this.lastErrorMessage || 'CLI process failed to start');
+    if (this.status === 'starting') this.setStatus('idle');
   }
 
   async sendInstruction(text: string): Promise<void> {
@@ -820,9 +821,11 @@ export class AntigravityAdapter implements CLIAdapter {
   }
 
   private translateError(msg: Json): void {
+    const errorMsg = String(msg['message'] ?? msg['error'] ?? 'The Antigravity CLI reported an error');
+    this.lastErrorMessage = errorMsg;
     this.emit({
       type: 'error',
-      message: String(msg['message'] ?? 'The Antigravity CLI reported an error'),
+      message: errorMsg,
       fatal: false,
     });
   }
@@ -871,6 +874,20 @@ export class AntigravityAdapter implements CLIAdapter {
             ? (res['error'] as string)
             : undefined;
     const result = typeof rawResult === 'string' ? truncateText(rawResult, 2000).text : undefined;
+
+    if (isExplicitError && !cancelled) {
+      const errorMsg =
+        (typeof res['error'] === 'string' && res['error']) ||
+        (typeof res['result'] === 'string' && res['result']) ||
+        (typeof res['response'] === 'string' && res['response']) ||
+        'The Antigravity CLI reported an error';
+      this.lastErrorMessage = errorMsg;
+      this.emit({
+        type: 'error',
+        message: errorMsg,
+        fatal: false,
+      });
+    }
 
     this.emit({
       type: 'turn_finished',

@@ -538,3 +538,52 @@ test('a session waiting on approval says so in the header', (t) => {
   assert.match(ui.document.querySelector('.topbar .subtitle').textContent, /waiting for your approval/);
   assert.ok(ui.document.querySelector('.topbar').classList.contains('awaiting-approval'));
 });
+
+test('history cards render delete button and clicking it calls DELETE endpoint', async (t) => {
+  const ui = mountClient(t);
+  ui.window.confirm = () => true;
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  const deleteBtn = ui.document.querySelector('.card-delete-btn');
+  assert.ok(deleteBtn, 'history card has a delete button');
+
+  deleteBtn.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const deleteCall = ui.fetchCalls.find((c) => c.url.includes('/api/sessions/sess0') && c.init?.method === 'DELETE');
+  assert.ok(deleteCall, 'DELETE request was sent for the history session');
+});
+
+test('dead session bar renders delete button and clicking it calls DELETE endpoint', async (t) => {
+  const ui = mountClient(t, '#/s/sess0');
+  ui.window.confirm = () => true;
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  const deleteBtn = [...ui.document.querySelectorAll('button')].find((b) => b.textContent === 'Delete');
+  assert.ok(deleteBtn, 'dead session composer bar has a Delete button');
+
+  deleteBtn.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const deleteCall = ui.fetchCalls.find((c) => c.url.includes('/api/sessions/sess0') && c.init?.method === 'DELETE');
+  assert.ok(deleteCall, 'DELETE request was sent for the dead session');
+});
+
+test('history section clear all button calls clear-history endpoint', async (t) => {
+  const ui = mountClient(t);
+  ui.window.confirm = () => true;
+  ui.socket().open();
+  ui.socket().receive(welcome);
+
+  const clearBtn = ui.document.querySelector('.section-action');
+  assert.ok(clearBtn, 'history section has a clear all button');
+  assert.match(clearBtn.textContent, /Clear all/);
+
+  clearBtn.click();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const clearCall = ui.fetchCalls.find((c) => c.url.includes('/api/sessions/clear-history') && c.init?.method === 'POST');
+  assert.ok(clearCall, 'POST clear-history request was sent');
+});

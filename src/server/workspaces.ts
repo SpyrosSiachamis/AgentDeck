@@ -21,9 +21,11 @@ const workspaceSchema = z.object({
   /** Optional per-workspace overrides for the CLI adapter. */
   adapterId: z.string().max(64).optional(),
   model: z.string().max(120).optional(),
+  models: z.record(z.string(), z.string().max(120)).optional(),
   permissionMode: z
     .enum(['default', 'acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'])
     .optional(),
+  permissionModes: z.record(z.string(), z.string().max(64)).optional(),
 });
 
 const registryFileSchema = z.object({
@@ -40,7 +42,9 @@ export type Workspace = Readonly<{
   enabled: boolean;
   adapterId?: string;
   model?: string;
+  models?: Record<string, string>;
   permissionMode?: string;
+  permissionModes?: Record<string, string>;
   /** Whether the resolved path is a git repository. */
   isGitRepo: boolean;
 }>;
